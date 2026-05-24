@@ -1,8 +1,17 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   plugins: [react()],
+  // 生产构建输出到 dist/server/public，编译后的后端能正确找到静态文件
+  build: {
+    outDir: path.resolve(__dirname, 'dist/server/public'),
+    emptyOutDir: true,
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,

@@ -2,6 +2,50 @@
 
 端到端自动化修复代码缺陷的自主决策型 AI Agent 系统。
 
+## 🚀 开箱即用
+
+### 方式一：Docker 一键启动（推荐）
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/libra-sys/MetaFix-Orchestrator.git
+cd MetaFix-Orchestrator
+
+# 2. 配置环境变量（编辑 .env 文件，填写 CODEBUDDY_API_KEY 等）
+cp .env.example .env
+# 用编辑器打开 .env 填写配置
+
+# 3. 一键启动
+docker-compose up -d
+
+# 4. 访问 http://localhost:3000
+```
+
+### 方式二：本地一键启动
+
+**Windows：**
+```bat
+# 双击运行 start.bat，按提示操作
+start.bat
+```
+
+**macOS / Linux：**
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+### 方式三：手动启动
+
+```bash
+npm install --legacy-peer-deps
+npm run build
+npm start
+# 访问 http://localhost:3000
+```
+
+---
+
 ## 简介
 
 MetaFix Orchestrator 是一个基于 CodeBuddy Agent SDK 构建的企业级智能缺陷修复系统。它能够自主完成从 Issue 分析、根因定位、代码修复、测试验证到创建 Pull Request 的完整闭环，无需人工干预。

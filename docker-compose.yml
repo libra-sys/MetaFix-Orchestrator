@@ -1,0 +1,57 @@
+version: "3.8"
+
+services:
+  metafix-orchestrator:
+    build: .
+    container_name: metafix-orchestrator
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_PATH=/app/data/chat.db
+      - VECTOR_DB_PATH=/app/data/vectors.db
+      # 请在此处填写你的实际配置
+      - CODEBUDDY_API_KEY=${CODEBUDDY_API_KEY:-}
+      - CODEBUDDY_BASE_URL=${CODEBUDDY_BASE_URL:-https://api.codebuddy.cn}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_OWNER=${GITHUB_OWNER:-}
+      - GITHUB_REPO=${GITHUB_REPO:-}
+      - SKILL_REGISTRY_URL=${SKILL_REGISTRY_URL:-}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - MAX_TOKENS_PER_SESSION=${MAX_TOKENS_PER_SESSION:-100000}
+      - MAX_COST_PER_SESSION=${MAX_COST_PER_SESSION:-1.00}
+    volumes:
+      # 持久化数据（数据库、技能缓存、日志）
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - metafix-network
+
+  # 可选：Nginx 反向代理（如需 HTTPS 或负载均衡）
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: metafix-nginx
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #   depends_on:
+  #     - metafix-orchestrator
+  #   networks:
+  #     - metafix-network
+  #   restart: unless-stopped
+
+networks:
+  metafix-network:
+    driver: bridge
+
+volumes:
+  metafix-data:

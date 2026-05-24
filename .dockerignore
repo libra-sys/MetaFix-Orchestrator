@@ -1,0 +1,16 @@
+node_modules/
+dist/
+server/public/
+data/
+*.db
+*.log
+.env
+.DS_Store
+*.md
+!README.md
+.vscode/
+.idea/
+*.tgz
+*.tar.gz
+coverage/
+.nyc_output/

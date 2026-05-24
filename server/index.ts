@@ -29,6 +29,14 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const isProduction = process.env.NODE_ENV === 'production';
+
+// 生产环境：服务前端静态文件
+if (isProduction) {
+  const publicDir = path.join(__dirname, 'public');
+  app.use(express.static(publicDir));
+  console.log(`[Server] 生产模式：服务静态文件 ${publicDir}`);
+}
 
 // Middleware
 app.use(express.json());
@@ -828,12 +836,23 @@ app.get("/api/agent/health", (req, res) => {
   });
 });
 
+// 生产环境：SPA 回退（必须放在所有 API 路由之后）
+if (isProduction) {
+  const publicDir = path.join(__dirname, 'public');
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+  console.log(`[Server] SPA 回退已启用`);
+}
+
 // 启动服务器
 app.listen(PORT, () => {
+  const mode = isProduction ? '生产' : '开发';
   console.log(`
 ╔════════════════════════════════════════════╗
 ║                                            ║
-║     ◉ API 服务器已启动                      ║
+║     ◉ MetaFix Orchestrator                   ║
+║        ${mode}模式                            ║
 ║                                            ║
 ║     地址: http://localhost:${PORT}            ║
 ║     数据库: SQLite (data/chat.db)          ║
