@@ -7,9 +7,9 @@ import {
   MenuUnfoldIcon,
 } from 'tdesign-icons-react';
 import { Bot } from 'lucide-react';
-import { APP_CONFIG } from '../config';
-import { Model, Session, Agent, Theme } from '../types';
-import { ICON_MAP } from '../utils/iconMap';
+import { APP_CONFIG } from './config';
+import { Model, Session, Agent, Theme } from './types';
+import { ICON_MAP } from './utils/iconMap';
 
 interface HeaderProps {
   isSettingsPage: boolean;

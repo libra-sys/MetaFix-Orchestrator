@@ -1,9 +1,9 @@
 import { Button, Tooltip } from 'tdesign-react';
 import { AddIcon, DeleteIcon, SettingIcon } from 'tdesign-icons-react';
 import { Bot } from 'lucide-react';
-import { APP_CONFIG } from '../config';
-import { Session, Agent } from '../types';
-import { ICON_MAP } from '../utils/iconMap';
+import { APP_CONFIG } from './config';
+import { Session, Agent } from './types';
+import { ICON_MAP } from './utils/iconMap';
 
 interface SidebarProps {
   sessions: Session[];

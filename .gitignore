@@ -16,6 +16,13 @@ build/
 server/public/
 *.tsbuildinfo
 
+# Compiled TypeScript output (keep only .ts sources)
+server/**/*.js
+server/**/*.d.ts
+!server/**/*.ts
+vite.config.js
+vite.config.d.ts
+
 # Database files
 data/*.db
 data/*.db-journal
@@ -49,3 +56,9 @@ coverage/
 
 # Misc
 .cache/
+
+# Portable build
+MetaFix-Orchestrator-Portable/
+MetaFix-Orchestrator-Portable.zip
+node_tmp/
+node.zip

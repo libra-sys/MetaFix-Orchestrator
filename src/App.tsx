@@ -2,17 +2,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { Routes, Route, useNavigate, useParams, useLocation } from 'react-router-dom';
 import '@tdesign-react/chat/es/style/index.js';
 
-import { useAgents } from './hooks/useAgents';
-import { useTheme } from './hooks/useTheme';
-import { useSessions } from './hooks/useSessions';
-import { useModels } from './hooks/useModels';
-import { useChat } from './hooks/useChat';
+import { useAgent } from './hooks/useAgent';
 import { PermissionMode } from './types';
 
-import { Sidebar } from './components/Sidebar';
-import { Header } from './components/Header';
-import { SettingsPage } from './components/SettingsPage';
-import { ChatPage } from './pages/ChatPage';
+import { Sidebar } from './Sidebar';
+import { Header } from './Header';
+import { SettingsPage } from './SettingsPage';
 
 function App() {
   return (
