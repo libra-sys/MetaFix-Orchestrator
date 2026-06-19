@@ -1,0 +1,22 @@
+[31mx[39m Build failed in 49.76s
+[31merror during build:
+[31msrc/App.tsx (10:7): "default" is not exported by "src/Sidebar.tsx", imported by "src/App.tsx".[31m
+file: [36mE:/MetaFix Orchestrator/src/App.tsx:10:7[31m
+[33m
+ 8: import ChatMessages from './ChatMessages';
+ 9: import ChatInput from './ChatInput';
+10: import Sidebar from './Sidebar';
+           ^
+11: import Header from './Header';
+12: import NewChatDialog from './NewChatDialog';
+[31m
+    at getRollupError (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/parseAst.js:406:41)
+    at error (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/parseAst.js:402:42)
+    at Module.error (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/node-entry.js:17390:16)
+    at Module.traceVariable (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/node-entry.js:17823:29)
+    at ModuleScope.findVariable (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/node-entry.js:15413:39)
+    at FunctionScope.findVariable (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/node-entry.js:5682:38)
+    at FunctionBodyScope.findVariable (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/node-entry.js:5682:38)
+    at Identifier.bind (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/node-entry.js:5449:40)
+    at CallExpression.bind (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/node-entry.js:2827:28)
+    at CallExpression.bind (file:///E:/MetaFix%20Orchestrator/node_modules/rollup/dist/es/shared/node-entry.js:12522:15)[39m

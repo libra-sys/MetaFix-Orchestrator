@@ -1,0 +1,39 @@
+npm ERR! code ERESOLVE
+npm ERR! ERESOLVE could not resolve
+npm ERR! 
+npm ERR! While resolving: @tencent-ai/agent-sdk@0.3.155
+npm ERR! Found: zod@3.25.76
+npm ERR! node_modules/zod
+npm ERR!   peer zod@"^3.25.0 || ^4.0.0" from @agentclientprotocol/sdk@0.18.2
+npm ERR!   node_modules/@agentclientprotocol/sdk
+npm ERR!     @agentclientprotocol/sdk@"^0.18.2" from @tencent-ai/agent-sdk@0.3.155
+npm ERR!     node_modules/@tencent-ai/agent-sdk
+npm ERR!       @tencent-ai/agent-sdk@"^0.3.43" from the root project
+npm ERR!   zod@"^3.25 || ^4.0" from @modelcontextprotocol/sdk@1.29.0
+npm ERR!   node_modules/@modelcontextprotocol/sdk
+npm ERR!     @modelcontextprotocol/sdk@"^1.0.0" from @tencent-ai/agent-sdk@0.3.155
+npm ERR!     node_modules/@tencent-ai/agent-sdk
+npm ERR!       @tencent-ai/agent-sdk@"^0.3.43" from the root project
+npm ERR!   4 more (@tdesign-react/chat, tdesign-web-components, openai, zod-to-json-schema)
+npm ERR! 
+npm ERR! Could not resolve dependency:
+npm ERR! peer zod@"^4.0.0" from @tencent-ai/agent-sdk@0.3.155
+npm ERR! node_modules/@tencent-ai/agent-sdk
+npm ERR!   @tencent-ai/agent-sdk@"^0.3.43" from the root project
+npm ERR! 
+npm ERR! Conflicting peer dependency: zod@4.4.3
+npm ERR! node_modules/zod
+npm ERR!   peer zod@"^4.0.0" from @tencent-ai/agent-sdk@0.3.155
+npm ERR!   node_modules/@tencent-ai/agent-sdk
+npm ERR!     @tencent-ai/agent-sdk@"^0.3.43" from the root project
+npm ERR! 
+npm ERR! Fix the upstream dependency conflict, or retry
+npm ERR! this command with --force or --legacy-peer-deps
+npm ERR! to accept an incorrect (and potentially broken) dependency resolution.
+npm ERR! 
+npm ERR! 
+npm ERR! For a full report see:
+npm ERR! C:\Users\吴海睿\AppData\Local\npm-cache\_logs\2026-05-27T05_19_39_591Z-eresolve-report.txt
+
+npm ERR! A complete log of this run can be found in:
+npm ERR!     C:\Users\吴海睿\AppData\Local\npm-cache\_logs\2026-05-27T05_19_39_591Z-debug-0.log

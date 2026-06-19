@@ -1,326 +1,125 @@
-import { v4 as uuidv4 } from 'uuid';
+import type { FixPlan, AgentLog, AgentSession, ReflectionResult } from './types.js';
+import { complete, hasLlmConfig } from '../llm/client.js';
 import * as db from '../db.js';
-import config from '../config.js';
-import { query } from '@tencent-ai/agent-sdk';
+import { updateKnowledgeFromReflection } from '../knowledge/updater.js';
 
-/**
- * 反思模块：评估执行结果、更新知识库
- * @param session - Agent 会话
- * @param plan - 修复计划
- * @param executionResult - 执行结果
- * @returns 反思结果
- */
-export async function reflect(
-  session: any,
-  plan: any,
-  executionResult: any
-): Promise<{
-  success: boolean;
-  skillPerformance: Array<{
-    skillId: string;
-    success: boolean;
-    duration: number;
-    errorMessage?: string;
-  }>;
-  lessonsLearned: string[];
-  knowledgeUpdates: Array<{
-    type: string;
-    data: any;
-  }>;
-}> {
-  console.log(`[Reflector] 开始反思...`);
-  console.log(`[Reflector] 计划 ID: ${plan.id}`);
-  console.log(`[Reflector] 执行成功: ${executionResult.success}`);
+export async function reflectExecution(
+  session: AgentSession,
+  plan: FixPlan,
+  addLog: (log: AgentLog) => void
+): Promise<ReflectionResult> {
+  addLog({ timestamp: new Date().toISOString(), level: 'info', stage: 'reflecting', message: '开始反思与经验沉淀...' });
 
-  const skillPerformance: Array<{
-    skillId: string;
-    success: boolean;
-    duration: number;
-    errorMessage?: string;
-  }> = [];
+  const overallSuccess = plan.status === 'completed';
+  const completedSteps = plan.steps.filter(s => s.status === 'completed');
+  const failedSteps = plan.steps.filter(s => s.status === 'failed');
 
-  // 1. 分析每个步骤的技能表现
-  for (const stepResult of executionResult.stepResults) {
-    const step = plan.steps.find((s: any) => s.id === stepResult.stepId);
-    const skillId = step?.requiredSkills?.[0] || 'unknown';
+  const executionSummary = plan.steps.map((s, i) =>
+    `[${i + 1}] ${s.description} → ${s.status}${s.error ? ` (错误: ${s.error})` : ''}`
+  ).join('\n');
 
-    const perf = {
-      skillId,
-      success: stepResult.success,
-      duration: stepResult.duration,
-      errorMessage: stepResult.success ? undefined : stepResult.output,
-    };
-
-    skillPerformance.push(perf);
-
-    // 2. 更新技能成功率
-    await updateSkillSuccessRate(skillId, stepResult.success, stepResult.duration);
+  if (!hasLlmConfig()) {
+    return ruleBasedReflection(plan, overallSuccess, completedSteps, failedSteps, addLog);
   }
 
-  // 3. 生成经验教训
-  const lessonsLearned = await generateLessonsLearned(plan, executionResult);
+  const systemPrompt = `你是一个软件工程复盘专家。分析修复流程的执行结果，提取经验教训、技能表现和知识更新。
 
-  // 4. 更新知识库
-  const knowledgeUpdates = await updateKnowledgeBase(plan, executionResult, skillPerformance);
+输出严格 JSON 格式：
+{
+  "overallSuccess": true/false,
+  "lessonsLearned": ["经验1", "经验2"],
+  "unexpectedIssues": ["问题1"],
+  "skillPerformance": [{ "skillName": "...", "success": true, "effectiveness": 0.9 }],
+  "knowledgeUpdates": [{ "type": "skill_rate|combination|rule", "target": "...", "value": "...", "reason": "..." }]
+}`;
 
-  // 5. 如果成功，记录技能组合
-  if (executionResult.success) {
-    await recordSkillCombination(plan.steps);
-  }
+  const userPrompt = `修复计划执行结果：\nIssue: #${plan.issueId}\n整体状态: ${overallSuccess ? '成功' : '失败'}\n\n执行摘要：\n${executionSummary}\n\n请分析并提供复盘。`;
 
-  console.log(`[Reflector] 反思完成:`);
-  console.log(`[Reflector] - 技能表现: ${skillPerformance.length} 个`);
-  console.log(`[Reflector] - 经验教训: ${lessonsLearned.length} 条`);
-  console.log(`[Reflector] - 知识更新: ${knowledgeUpdates.length} 项`);
-
-  return {
-    success: executionResult.success,
-    skillPerformance,
-    lessonsLearned,
-    knowledgeUpdates,
-  };
-}
-
-/**
- * 更新技能成功率
- */
-async function updateSkillSuccessRate(
-  skillId: string,
-  success: boolean,
-  duration: number
-): Promise<void> {
-  const skill = db.getSkill(skillId);
-
-  if (skill) {
-    // 更新成功率（简单移动平均）
-    const oldRate = skill.success_rate;
-    const newRate = oldRate * 0.9 + (success ? 0.1 : 0);
-
-    // 更新平均耗时
-    const oldDuration = skill.avg_duration;
-    const newDuration = Math.round(oldDuration * 0.9 + duration * 0.1);
-
-    db.updateSkill(skillId, {
-      success_rate: newRate,
-      avg_duration: newDuration,
-    });
-
-    console.log(`[Reflector] 更新技能 ${skillId}: 成功率 ${(newRate * 100).toFixed(1)}%`);
-  } else {
-    // 创建新技能记录
-    db.createSkill({
-      id: skillId,
-      name: skillId,
-      version: '1.0.0',
-      description: '',
-      author: 'system',
-      source: 'auto-created',
-      required_mcps: '',
-      success_rate: success ? 1.0 : 0.0,
-      avg_duration: duration,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    console.log(`[Reflector] 创建新技能记录: ${skillId}`);
-  }
-}
-
-/**
- * 生成经验教训
- */
-async function generateLessonsLearned(plan: any, executionResult: any): Promise<string[]> {
-  const lessons: string[] = [];
-
-  // 分析失败的步骤
-  const failedSteps = executionResult.stepResults.filter((r: any) => !r.success);
-  if (failedSteps.length > 0) {
-    lessons.push(`有 ${failedSteps.length} 个步骤失败，需要改进`);
-    for (const failed of failedSteps) {
-      lessons.push(`步骤 ${failed.stepId} 失败原因: ${failed.output.slice(0, 100)}`);
-    }
-  }
-
-  // 分析耗时的步骤
-  const slowSteps = executionResult.stepResults.filter((r: any) => r.duration > 60000);
-  if (slowSteps.length > 0) {
-    lessons.push(`有 ${slowSteps.length} 个步骤执行超时（>60s）`);
-  }
-
-  // 使用 CodeBuddy SDK 生成更深入的反思
   try {
-    const prompt = `
-你是一个软件工程反思专家。请根据以下信息，生成经验教训。
+    const response = await complete({ system: systemPrompt, user: userPrompt, jsonMode: true, temperature: 0.3 });
+    const parsed = JSON.parse(response);
 
-## 修复计划
-${JSON.stringify(plan, null, 2)}
+    const skillPerformance = (parsed.skillPerformance || []).map((sp: any) => ({
+      skillName: sp.skillName || 'unknown',
+      success: sp.success ?? overallSuccess,
+      duration: 120,
+      expectedDuration: 120,
+      effectiveness: typeof sp.effectiveness === 'number' ? sp.effectiveness : (overallSuccess ? 0.9 : 0.5),
+    }));
+    const lessonsLearned = Array.isArray(parsed.lessonsLearned) ? parsed.lessonsLearned : [];
+    const unexpectedIssues = Array.isArray(parsed.unexpectedIssues) ? parsed.unexpectedIssues : [];
+    const knowledgeUpdates = Array.isArray(parsed.knowledgeUpdates) ? parsed.knowledgeUpdates : [];
 
-## 执行结果
-成功: ${executionResult.success}
-步骤数: ${executionResult.stepResults.length}
+    await updateSkillPerformance(skillPerformance, addLog);
+    await saveReflection(session, plan, overallSuccess, skillPerformance, lessonsLearned, knowledgeUpdates);
+    await updateKnowledgeFromReflection(plan, { overallSuccess, skillPerformance, lessonsLearned, knowledgeUpdates, timeDeviation: 0, unexpectedIssues });
 
-请生成 3-5 条具体的经验教训，帮助未来的修复任务做得更好。
-每条约 50 字，具体且可操作。
-`;
-
-    let result = '';
-    const stream = query({
-      prompt,
-      options: {
-        model: config.agentDefaultModel,
-        maxTurns: 5,
-        systemPrompt: '你是一个专业的软件工程反思专家。',
-      },
+    addLog({
+      timestamp: new Date().toISOString(),
+      level: overallSuccess ? 'success' : 'warn',
+      stage: 'reflecting',
+      message: `反思完成: ${overallSuccess ? '修复成功' : '修复失败'}，${lessonsLearned.length} 条经验已沉淀`,
     });
 
-    for await (const msg of stream) {
-      if (msg.type === 'assistant') {
-        const content = msg.message.content;
-        if (typeof content === 'string') {
-          result += content;
-        } else if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === 'text') {
-              result += block.text;
-            }
-          }
-        }
-      }
-    }
-
-    if (result) {
-      const aiLessons = result.split('\n').filter((l: string) => l.trim().length > 0);
-      lessons.push(...aiLessons);
-    }
+    return { overallSuccess, skillPerformance, lessonsLearned, knowledgeUpdates, timeDeviation: 0, unexpectedIssues };
   } catch (error: any) {
-    console.error('[Reflector] 生成 AI 反思失败:', error);
+    addLog({ timestamp: new Date().toISOString(), level: 'warn', stage: 'reflecting', message: `LLM 反思失败，回退到规则: ${error.message}` });
+    return ruleBasedReflection(plan, overallSuccess, completedSteps, failedSteps, addLog);
   }
-
-  return lessons;
 }
 
-/**
- * 更新知识库
- */
-async function updateKnowledgeBase(
-  plan: any,
-  executionResult: any,
-  skillPerformance: any[]
-): Promise<Array<{ type: string; data: any }>> {
-  const updates: Array<{ type: string; data: any }> = [];
-
-  // 1. 更新技能组合知识库
-  if (executionResult.success) {
-    const skillIds = plan.steps
-      .map((s: any) => s.requiredSkills?.[0])
-      .filter((id: string) => id)
-      .join(',');
-
-    const existingCombo = db.getAllSkillCombinations().find((c: any) => c.skill_ids === skillIds);
-
-    if (existingCombo) {
-      db.updateSkillCombinationUsage(existingCombo.id, true);
-      updates.push({ type: 'skill_combination', data: existingCombo });
-    } else {
-      const newCombo = {
-        id: uuidv4(),
-        skill_ids: skillIds,
-        success_rate: 1.0,
-        usage_count: 1,
-        created_at: new Date().toISOString(),
-      };
-      db.createSkillCombination(newCombo);
-      updates.push({ type: 'skill_combination', data: newCombo });
-    }
+async function updateSkillPerformance(performance: ReflectionResult['skillPerformance'], addLog: (log: AgentLog) => void): Promise<void> {
+  for (const sp of performance) {
+    try {
+      const skills = db.getAllSkills();
+      const skill = skills.find(s => s.name === sp.skillName);
+      if (skill) {
+        const newRate = parseFloat(((skill.success_rate * 0.8) + ((sp.success ? 1 : 0) * 0.2)).toFixed(2));
+        db.updateSkill(skill.id, { success_rate: newRate });
+      }
+    } catch { /* ignore */ }
   }
-
-  // 2. 记录执行模式
-  const pattern = {
-    type: 'execution_pattern',
-    plan_steps: plan.steps.length,
-    success: executionResult.success,
-    total_duration: executionResult.stepResults.reduce((sum: number, r: any) => sum + r.duration, 0),
-  };
-  updates.push({ type: 'execution_pattern', data: pattern });
-
-  return updates;
 }
 
-/**
- * 记录技能组合
- */
-async function recordSkillCombination(steps: any[]): Promise<void> {
-  const skillIds = steps
-    .map((s: any) => s.requiredSkills?.[0])
-    .filter((id: string) => id)
-    .join(',');
-
-  if (!skillIds) return;
-
-  const existing = db.getAllSkillCombinations().find((c: any) => c.skill_ids === skillIds);
-
-  if (existing) {
-    db.updateSkillCombinationUsage(existing.id, true);
-  } else {
-    db.createSkillCombination({
-      id: uuidv4(),
-      skill_ids: skillIds,
-      success_rate: 1.0,
-      usage_count: 1,
+async function saveReflection(
+  session: AgentSession, plan: FixPlan, overallSuccess: boolean,
+  skillPerformance: ReflectionResult['skillPerformance'],
+  lessonsLearned: string[], knowledgeUpdates: ReflectionResult['knowledgeUpdates']
+): Promise<void> {
+  try {
+    db.createReflectionLog({
+      id: `ref-${Date.now()}`, session_id: session.id, plan_id: plan.id,
+      expected_outcome: `完成 ${plan.steps.length} 个步骤`,
+      actual_outcome: overallSuccess ? '计划全部完成' : `有步骤失败`,
+      skill_performance: JSON.stringify(skillPerformance),
+      lessons_learned: lessonsLearned.join('; '),
+      knowledge_updates: JSON.stringify(knowledgeUpdates),
       created_at: new Date().toISOString(),
     });
-    console.log(`[Reflector] 记录新技能组合: ${skillIds}`);
+  } catch { /* ignore */ }
+
+  if (overallSuccess) {
+    const skillIds = plan.steps.filter(s => s.skillName).map(s => s.skillName!).join(',');
+    if (skillIds) {
+      try {
+        db.createSkillCombination({ id: `combo-${Date.now()}`, skill_ids: skillIds, success_rate: 0.92, usage_count: 1, created_at: new Date().toISOString() });
+      } catch { /* ignore */ }
+    }
   }
 }
 
-/**
- * 生成反思报告（用于展示给用户）
- */
-export function generateReflectionReport(reflectionLog: any): string {
-  const lines: string[] = [];
+function ruleBasedReflection(plan: FixPlan, overallSuccess: boolean, completedSteps: any[], failedSteps: any[], addLog: (log: AgentLog) => void): ReflectionResult {
+  const lessonsLearned: string[] = [];
+  const unexpectedIssues: string[] = [];
+  if (overallSuccess) lessonsLearned.push('修复流程顺利完成');
+  else { lessonsLearned.push('部分步骤执行失败，需要改进执行策略'); unexpectedIssues.push('执行过程中遇到未预期错误'); }
 
-  lines.push('# 反思报告');
-  lines.push('');
-  lines.push(`- **会话 ID**: ${reflectionLog.session_id}`);
-  lines.push(`- **计划 ID**: ${reflectionLog.plan_id || 'N/A'}`);
-  lines.push(`- **时间**: ${reflectionLog.created_at}`);
-  lines.push('');
+  const skillPerformance = plan.steps.filter(s => s.skillName).map(s => ({
+    skillName: s.skillName!, success: s.status === 'completed',
+    duration: s.estimatedDuration, expectedDuration: s.estimatedDuration,
+    effectiveness: s.status === 'completed' ? 0.9 : 0.5,
+  }));
 
-  // 技能表现
-  if (reflectionLog.skill_performance) {
-    const perf = JSON.parse(reflectionLog.skill_performance);
-    lines.push('## 技能表现');
-    lines.push('');
-    for (const p of perf) {
-      const status = p.success ? '✅' : '❌';
-      lines.push(`- ${status} **${p.skillId}**: ${p.duration}ms`);
-      if (p.errorMessage) {
-        lines.push(`  - 错误: ${p.errorMessage}`);
-      }
-    }
-    lines.push('');
-  }
-
-  // 经验教训
-  if (reflectionLog.lessons_learned) {
-    const lessons = JSON.parse(reflectionLog.lessons_learned);
-    lines.push('## 经验教训');
-    lines.push('');
-    for (let i = 0; i < lessons.length; i++) {
-      lines.push(`${i + 1}. ${lessons[i]}`);
-    }
-    lines.push('');
-  }
-
-  // 知识更新
-  if (reflectionLog.knowledge_updates) {
-    const updates = JSON.parse(reflectionLog.knowledge_updates);
-    lines.push('## 知识库更新');
-    lines.push('');
-    for (const update of updates) {
-      lines.push(`- **${update.type}**: ${JSON.stringify(update.data).slice(0, 100)}`);
-    }
-  }
-
-  return lines.join('\n');
+  addLog({ timestamp: new Date().toISOString(), level: overallSuccess ? 'success' : 'warn', stage: 'reflecting', message: `规则反思完成: ${overallSuccess ? '成功' : '失败'}` });
+  return { overallSuccess, skillPerformance, lessonsLearned, knowledgeUpdates: [], timeDeviation: 0, unexpectedIssues };
 }

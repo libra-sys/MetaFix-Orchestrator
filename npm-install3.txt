@@ -1,0 +1,10 @@
+npm WARN EBADENGINE Unsupported engine {
+npm WARN EBADENGINE   package: 'pdf-parse@2.4.5',
+npm WARN EBADENGINE   required: { node: '>=20.16.0 <21 || >=22.3.0' },
+npm WARN EBADENGINE   current: { node: 'v18.15.0', npm: '9.5.0' }
+npm WARN EBADENGINE }
+npm WARN EBADENGINE Unsupported engine {
+npm WARN EBADENGINE   package: 'pdfjs-dist@5.4.296',
+npm WARN EBADENGINE   required: { node: '>=20.16.0 || >=22.3.0' },
+npm WARN EBADENGINE   current: { node: 'v18.15.0', npm: '9.5.0' }
+npm WARN EBADENGINE }

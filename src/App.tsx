@@ -1,202 +1,143 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Routes, Route, useNavigate, useParams, useLocation } from 'react-router-dom';
-import '@tdesign-react/chat/es/style/index.js';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Layout, MessageCircle, Zap, Server, Users, Settings, Home, Plus, ChevronLeft, ChevronRight, Bot, CheckCircle, AlertTriangle } from 'lucide-react';
+import type { Session, UnifiedModel, PermissionRequest } from './types';
+import DashboardPage from './pages/DashboardPage';
+import ChatPage from './pages/ChatPage';
+import SkillsPage from './pages/SkillsPage';
+import McpPage from './pages/McpPage';
+import SubAgentsPage from './pages/SubAgentsPage';
+import FixFlowPage from './pages/FixFlowPage';
+import SettingsPage from './pages/SettingsPage';
 
-import { useAgent } from './hooks/useAgent';
-import { PermissionMode } from './types';
+export const API = 'http://localhost:3000/api';
 
-import { Sidebar } from './Sidebar';
-import { Header } from './Header';
-import { SettingsPage } from './SettingsPage';
+type Page = 'dashboard' | 'chat' | 'skills' | 'mcp' | 'agents' | 'settings' | 'fix';
 
-function App() {
-  return (
-    <Routes>
-      <Route path="/" element={<AppContent />} />
-      <Route path="/chat/:sessionId" element={<AppContent />} />
-      <Route path="/settings" element={<AppContent />} />
-    </Routes>
-  );
-}
-
-function AppContent() {
-  const navigate = useNavigate();
-  const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
-  const location = useLocation();
-  const isSettingsPage = location.pathname === '/settings';
-  
-  // Hooks
-  const { theme, toggleTheme } = useTheme();
-  const { agents, addAgent, updateAgent, deleteAgent, getAgent } = useAgents();
-  const { models, selectedModel, setSelectedModel, fetchModels } = useModels();
-  const {
-    sessions,
-    setSessions,
-    currentSessionId,
-    setCurrentSessionId,
-    currentSession,
-    sessionModels,
-    fetchSessions,
-    deleteSession,
-    updateSessionModel,
-    addSession,
-    updateSession,
-    updateSessionMessages,
-  } = useSessions();
-
-  // 聊天 Hook
-  const {
-    isLoading,
-    inputValue,
-    setInputValue,
-    permissionRequest,
-    sendMessage,
-    handleStop,
-    handlePermissionAllow,
-    handlePermissionDeny,
-  } = useChat({
-    currentSession,
-    currentSessionId,
-    selectedModel,
-    getAgent,
-    addSession,
-    updateSession,
-    updateSessionMessages,
-    updateSessionModel,
-    setCurrentSessionId,
-    setSessions,
-  });
-
-  // 获取当前会话的 Agent
-  const currentAgent = currentSession?.agentId ? getAgent(currentSession.agentId) : getAgent('default');
-
-  // 从 URL 同步 sessionId
-  useEffect(() => {
-    if (urlSessionId && urlSessionId !== currentSessionId) {
-      setCurrentSessionId(urlSessionId);
-    } else if (!urlSessionId && !isSettingsPage && currentSessionId) {
-      setCurrentSessionId(null);
-    }
-  }, [urlSessionId, isSettingsPage, currentSessionId, setCurrentSessionId]);
-
-  // 当切换会话时，恢复该会话的模型选择
-  useEffect(() => {
-    if (currentSessionId && sessionModels[currentSessionId]) {
-      setSelectedModel(sessionModels[currentSessionId]);
-    } else if (currentSession) {
-      setSelectedModel(currentSession.model);
-    }
-  }, [currentSessionId, sessionModels, currentSession, setSelectedModel]);
-
-  // 初始加载会话列表
-  useEffect(() => {
-    fetchSessions();
-  }, [fetchSessions]);
-
-  // 更新当前会话的模型
-  const updateCurrentSessionModel = useCallback((modelId: string) => {
-    setSelectedModel(modelId);
-    if (currentSessionId) {
-      updateSessionModel(currentSessionId, modelId);
-    }
-  }, [currentSessionId, updateSessionModel, setSelectedModel]);
-
-  // 删除会话处理
-  const handleDeleteSession = useCallback(async (sessionId: string) => {
-    const navigateTo = await deleteSession(sessionId);
-    if (navigateTo) {
-      navigate(navigateTo);
-    }
-  }, [deleteSession, navigate]);
-
-  // 侧边栏事件处理
-  const handleNewChat = useCallback(() => {
-    setCurrentSessionId(null);
-    navigate('/');
-  }, [navigate, setCurrentSessionId]);
-
-  const handleSelectSession = useCallback((sessionId: string) => {
-    setCurrentSessionId(sessionId);
-    navigate(`/chat/${sessionId}`);
-  }, [navigate, setCurrentSessionId]);
-
-  const handleOpenSettings = useCallback(() => {
-    navigate('/settings');
-  }, [navigate]);
-
-  // Sidebar 状态
+export default function App() {
+  const [page, setPage] = useState<Page>('dashboard');
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [models, setModels] = useState<UnifiedModel[]>([]);
+  const [currentModel, setCurrentModel] = useState<UnifiedModel | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  
-  // 权限模式状态
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
+  const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
+
+  useEffect(() => { fetchSessions(); fetchModels(); }, []);
+
+  const fetchSessions = async () => {
+    try { const r = await fetch(`${API}/sessions`); const d = await r.json(); setSessions(d.sessions || []); } catch {}
+  };
+  const fetchModels = async () => {
+    try { const r = await fetch(`${API}/models`); const d = await r.json(); setModels(d.models || []); if (d.models?.[0]) setCurrentModel(d.models[0]); } catch {}
+  };
+
+  const createSession = async () => {
+    try {
+      const r = await fetch(`${API}/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: currentModel?.modelId || 'claude-sonnet-4', title: '新对话' }) });
+      const d = await r.json();
+      if (d.session) { setSessions(prev => [d.session, ...prev]); setCurrentSessionId(d.session.id); setPage('chat'); }
+    } catch {}
+  };
+
+  const respondPermission = async (requestId: string, behavior: 'allow' | 'deny') => {
+    try { await fetch(`${API}/permission-response`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId, behavior }) }); setPermissions(prev => prev.filter(p => p.requestId !== requestId)); } catch {}
+  };
+
+  const navItems: { key: Page; label: string; icon: React.ReactNode }[] = [
+    { key: 'dashboard', label: '概览', icon: <Home size={20} /> },
+    { key: 'chat', label: '对话', icon: <MessageCircle size={20} /> },
+    { key: 'skills', label: '技能', icon: <Zap size={20} /> },
+    { key: 'mcp', label: 'MCP', icon: <Server size={20} /> },
+    { key: 'agents', label: '子智能体', icon: <Bot size={20} /> },
+    { key: 'fix', label: '修复流程', icon: <CheckCircle size={20} /> },
+    { key: 'settings', label: '设置', icon: <Settings size={20} /> },
+  ];
+
+  const pageTitles: Record<Page, string> = {
+    dashboard: 'Dashboard',
+    chat: '对话',
+    skills: '技能管理',
+    mcp: 'MCP 服务器',
+    agents: '子智能体',
+    fix: '修复流程',
+    settings: '系统设置',
+  };
 
   return (
-    <div 
-      className="flex h-screen w-screen"
-      style={{ backgroundColor: 'var(--td-bg-color-page)' }}
-    >
-      {/* 侧边栏 */}
-      <Sidebar
-        sessions={sessions}
-        currentSessionId={currentSessionId}
-        isSettingsPage={isSettingsPage}
-        sidebarOpen={sidebarOpen}
-        agents={agents}
-        getAgent={getAgent}
-        onNewChat={handleNewChat}
-        onSelectSession={handleSelectSession}
-        onDeleteSession={handleDeleteSession}
-        onOpenSettings={handleOpenSettings}
-      />
+    <div className="flex h-screen w-screen overflow-hidden bg-[var(--bg-root)]">
+      {/* Sidebar */}
+      <aside className={`${sidebarOpen ? 'w-64' : 'w-16'} flex-shrink-0 transition-all duration-300 flex flex-col p-4`}>
+        <div className="dashboard-card flex flex-col h-full p-4">
+          <div className="flex items-center gap-3 mb-8 px-2">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[var(--accent-primary)] to-[#8B5CF6] flex items-center justify-center text-white font-bold text-sm">M</div>
+            {sidebarOpen && <span className="font-semibold text-[var(--text-primary)] text-sm tracking-tight">MetaFix</span>}
+          </div>
+          <nav className="flex-1 space-y-1">
+            {navItems.map(item => (
+              <button key={item.key} onClick={() => setPage(item.key)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${page === item.key ? 'bg-[var(--accent-primary)] text-white shadow-lg shadow-[var(--accent-primary)]/20' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'}`}>
+                {item.icon}
+                {sidebarOpen && <span>{item.label}</span>}
+              </button>
+            ))}
+          </nav>
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="mt-auto mx-auto p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors">
+            {sidebarOpen ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}
+          </button>
+        </div>
+      </aside>
 
-      {/* 主内容区 */}
-      <main 
-        className="flex-1 flex flex-col min-w-0"
-        style={{ backgroundColor: 'var(--td-bg-color-page)' }}
-      >
-        {/* 顶部栏 */}
-        <Header
-          isSettingsPage={isSettingsPage}
-          sidebarOpen={sidebarOpen}
-          theme={theme}
-          currentSession={currentSession}
-          currentAgent={currentAgent}
-          models={models}
-          onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
-          onToggleTheme={toggleTheme}
-          onRefreshModels={fetchModels}
-        />
+      {/* Main */}
+      <main className="flex-1 flex flex-col min-w-0 p-4 pl-0">
+        <div className="dashboard-card flex-1 flex flex-col overflow-hidden">
+          {/* Header */}
+          <header className="flex items-center justify-between px-6 py-4 border-b border-[var(--td-border-level-1-color)]">
+            <div>
+              <h1 className="text-lg font-semibold text-[var(--text-primary)]">{pageTitles[page]}</h1>
+              <p className="text-xs text-[var(--text-tertiary)] mt-0.5">MetaFix Orchestrator — 自主决策型 AI Agent</p>
+            </div>
+            <div className="flex items-center gap-3">
+              {page === 'chat' && (
+                <button onClick={createSession} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[var(--accent-primary)] text-white text-sm font-medium hover:opacity-90 transition-opacity shadow-lg shadow-[var(--accent-primary)]/20">
+                  <Plus size={16} /> 新对话
+                </button>
+              )}
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--accent-primary)] to-[var(--accent-secondary)] flex items-center justify-center text-white text-xs font-bold">U</div>
+            </div>
+          </header>
 
-        {/* 设置页面或聊天页面 */}
-        {isSettingsPage ? (
-          <SettingsPage
-            agents={agents}
-            onAdd={addAgent}
-            onUpdate={updateAgent}
-            onDelete={deleteAgent}
-          />
-        ) : (
-          <ChatPage
-            currentSession={currentSession}
-            models={models}
-            selectedModel={selectedModel}
-            agents={agents}
-            isLoading={isLoading}
-            inputValue={inputValue}
-            permissionRequest={permissionRequest}
-            permissionMode={permissionMode}
-            onSendMessage={sendMessage}
-            onStop={handleStop}
-            onInputChange={setInputValue}
-            onModelChange={updateCurrentSessionModel}
-            onPermissionAllow={handlePermissionAllow}
-            onPermissionDeny={handlePermissionDeny}
-            onPermissionModeChange={setPermissionMode}
-          />
-        )}
+          {/* Content */}
+          <div className="flex-1 overflow-auto p-6">
+            {page === 'dashboard' && <DashboardPage onNavigate={setPage} sessions={sessions} />}
+            {page === 'chat' && <ChatPage sessions={sessions} currentSessionId={currentSessionId} setCurrentSessionId={setCurrentSessionId} models={models} currentModel={currentModel} />}
+            {page === 'skills' && <SkillsPage />}
+            {page === 'mcp' && <McpPage />}
+            {page === 'agents' && <SubAgentsPage />}
+            {page === 'fix' && <FixFlowPage />}
+            {page === 'settings' && <SettingsPage models={models} onModelsChange={fetchModels} />}
+          </div>
+        </div>
       </main>
+
+      {/* Permission toasts */}
+      {permissions.length > 0 && (
+        <div className="fixed bottom-6 right-6 z-50 space-y-3 w-80">
+          {permissions.map(p => (
+            <div key={p.requestId} className="dashboard-card p-4 border-l-4 border-[var(--warning)]">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={18} className="text-[var(--warning)] flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-[var(--text-primary)]">工具调用请求</p>
+                  <p className="text-xs text-[var(--text-secondary)] mt-1 truncate">{p.toolName}</p>
+                  <div className="flex gap-2 mt-3">
+                    <button onClick={() => respondPermission(p.requestId, 'allow')} className="flex-1 py-1.5 rounded-lg bg-[var(--success)] text-white text-xs font-medium hover:opacity-90">允许</button>
+                    <button onClick={() => respondPermission(p.requestId, 'deny')} className="flex-1 py-1.5 rounded-lg bg-[var(--error)] text-white text-xs font-medium hover:opacity-90">拒绝</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
-
-export default App;

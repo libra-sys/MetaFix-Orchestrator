@@ -7,9 +7,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   plugins: [react()],
-  // 生产构建输出到 dist/server/public，编译后的后端能正确找到静态文件
+  // 生产构建输出到 server/public，服务器能正确找到静态文件
   build: {
-    outDir: path.resolve(__dirname, 'dist/server/public'),
+    outDir: path.resolve(__dirname, 'server', 'public'),
     emptyOutDir: true,
   },
   server: {

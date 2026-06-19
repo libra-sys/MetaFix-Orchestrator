@@ -1,87 +1,117 @@
-/**
- * 类型定义
- */
-
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
-
-export interface Model {
-  modelId: string;
-  name: string;
-  description?: string;
-}
-
-export interface ToolCall {
-  id: string;
-  name: string;
-  input?: Record<string, unknown>;
-  status: 'running' | 'completed' | 'error';
-  result?: string;
-  isError?: boolean;
-}
-
-/**
- * 内容块类型 - 支持文字和工具调用按顺序排列
- */
-export type ContentBlock = 
-  | { type: 'text'; text: string }
-  | { type: 'tool_use'; toolCall: ToolCall };
-
-export interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;  // 保留用于兼容，存储纯文本摘要
-  model?: string;
-  timestamp: Date;
-  isStreaming?: boolean;
-  toolCalls?: ToolCall[];  // 保留用于兼容
-  contentBlocks?: ContentBlock[];  // 新增：按顺序排列的内容块
-}
-
 export interface Session {
   id: string;
   title: string;
   model: string;
-  agentId?: string;
-  cwd?: string;
-  permissionMode?: PermissionMode;
-  createdAt: Date;
-  messages: Message[];
+  sdk_session_id: string | null;
+  created_at: string;
+  updated_at: string;
+  messageCount?: number;
 }
 
-export interface CustomAgent {
+export interface Message {
+  id: string;
+  session_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  model: string | null;
+  created_at: string;
+  tool_calls: any;
+}
+
+export interface UnifiedModel {
+  modelId: string;
+  name: string;
+  provider: string;
+  description?: string;
+  isUserConfigured?: boolean;
+  userModelId?: string;
+  baseUrl?: string;
+  apiKey?: string;
+}
+
+export interface UserModel {
   id: string;
   name: string;
-  description?: string;
-  systemPrompt: string;
-  icon?: string;
-  color?: string;
-  permissionMode?: PermissionMode;
-  createdAt: Date;
-  updatedAt: Date;
+  provider: string;
+  model_id: string;
+  api_key: string;
+  base_url: string;
+  enabled: number;
+  created_at: string;
+  updated_at: string;
 }
 
-// Agent 是 CustomAgent 的别名
-export type Agent = CustomAgent;
+export interface Skill {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  source: string;
+  required_mcps: string;
+  success_rate: number;
+  avg_duration: number;
+  created_at: string;
+  updated_at: string;
+}
 
-export type Theme = 'light' | 'dark';
+export interface SubAgent {
+  id: string;
+  name: string;
+  type: string;
+  description: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
 
-/**
- * 权限请求 - 用于工具调用确认
- */
+export interface McpServer {
+  name: string;
+  running: boolean;
+  pid: number | null;
+  error: string | null;
+}
+
+export interface FixPlan {
+  id: string;
+  issue_id: string;
+  steps: string;
+  estimated_tokens: number;
+  estimated_cost: number;
+  risk_level: string;
+  requires_approval: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentSession {
+  id: string;
+  issueUrl: string;
+  issueId: string;
+  state: string;
+  progress: number;
+  currentStep: number;
+  totalSteps: number;
+  plan?: any;
+  logs: AgentLog[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentLog {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error' | 'success';
+  stage: string;
+  message: string;
+  details?: any;
+}
+
 export interface PermissionRequest {
   requestId: string;
   toolUseId: string;
   toolName: string;
-  input: Record<string, unknown>;
+  input: any;
   sessionId: string;
   timestamp: number;
-}
-
-/**
- * 权限响应
- */
-export interface PermissionResponse {
-  requestId: string;
-  behavior: 'allow' | 'deny';
-  message?: string;
 }

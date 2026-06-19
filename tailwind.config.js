@@ -1,52 +1,38 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
-  ],
-  darkMode: 'class',
+  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
     extend: {
       colors: {
-        background: 'var(--td-bg-color-page)',
-        foreground: 'var(--td-text-color-primary)',
-        muted: {
-          DEFAULT: 'var(--td-bg-color-component)',
-          foreground: 'var(--td-text-color-secondary)',
-        },
-        border: 'var(--td-component-stroke)',
-        input: 'var(--td-bg-color-component)',
-        card: {
-          DEFAULT: 'var(--td-bg-color-container)',
-          foreground: 'var(--td-text-color-primary)',
-        },
+        surface: 'var(--bg-surface)',
+        elevated: 'var(--bg-elevated)',
+        field: 'var(--bg-field)',
+        'text-primary': 'var(--text-primary)',
+        'text-secondary': 'var(--text-secondary)',
+        'text-tertiary': 'var(--text-tertiary)',
         accent: {
-          DEFAULT: 'var(--td-brand-color)',
-          foreground: 'var(--td-text-color-anti)',
-          light: 'var(--td-brand-color-light)',
+          DEFAULT: 'var(--accent-primary)',
+          pink: 'var(--accent-secondary)',
         },
-        primary: {
-          DEFAULT: 'var(--td-text-color-primary)',
-          foreground: 'var(--td-bg-color-page)',
-        }
+        success: { DEFAULT: 'var(--success)', soft: '#DCFCE7' },
+        warning: { DEFAULT: 'var(--warning)', soft: '#FEF3C7' },
+        error: { DEFAULT: 'var(--error)', soft: '#FEE2E2' },
+        info: { DEFAULT: 'var(--info)', soft: '#DBEAFE' },
+      },
+      fontFamily: {
+        display: ['Outfit', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+        body: ['Inter', '-apple-system', 'BlinkMacSystemFont', '"PingFang SC"', '"Microsoft YaHei"', 'sans-serif'],
       },
       borderRadius: {
-        'xl': '16px',
+        xl: '16px',
         '2xl': '20px',
+        '3xl': '24px',
       },
-      animation: {
-        'cursor-blink': 'blink 1s infinite',
-      },
-      keyframes: {
-        blink: {
-          '0%, 50%': { opacity: '1' },
-          '51%, 100%': { opacity: '0' },
-        },
+      boxShadow: {
+        card: 'var(--card-shadow)',
+        'card-hover': 'var(--card-shadow-hover)',
       },
     },
   },
   plugins: [],
-  corePlugins: {
-    preflight: false,
-  }
 }

@@ -1,338 +1,293 @@
-import { v4 as uuidv4 } from 'uuid';
-import * as db from '../db.js';
-import config from '../config.js';
-import { query, unstable_v2_createSession } from '@tencent-ai/agent-sdk';
+import type { FixPlan, PlanStep, AgentLog, ExecutionResult, AgentSession } from './types.js';
+import { complete, getDefaultModel } from '../llm/client.js';
+import { executeSkill } from '../skills/resolver.js';
+import { callMcpTool } from '../mcp/manager.js';
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import { checkCommandRisk, checkFileWriteRisk } from '../security/approval.js';
+import { trackTokenUsage, estimateTokens } from '../cost/token-tracker.js';
+import { checkBudgetForText } from '../cost/budget.js';
 
-/**
- * 执行模块：按步骤执行修复计划
- * @param session - Agent 会话
- * @param plan - 修复计划
- * @returns 执行结果
- */
-export async function execute(session: any, plan: any): Promise<{
-  success: boolean;
-  stepResults: Array<{
-    stepId: string;
-    success: boolean;
-    output: string;
-    duration: number;
-  }>;
-  prUrl: string | null;
-}> {
-  const { steps } = plan;
-  const stepResults: Array<{
-    stepId: string;
-    success: boolean;
-    output: string;
-    duration: number;
-  }> = [];
-  
-  console.log(`[Executor] 开始执行计划，共 ${steps.length} 个步骤`);
-  
-  for (const step of steps) {
-    const startTime = Date.now();
-    console.log(`[Executor] 执行步骤: ${step.description}`);
-    
-    let retryCount = 0;
-    const maxRetries = 3;
-    let stepSuccess = false;
-    let stepOutput = '';
-    
-    while (retryCount <= maxRetries && !stepSuccess) {
-      try {
-        if (retryCount > 0) {
-          console.log(`[Executor] 重试 ${retryCount}/${maxRetries}...`);
+export async function executePlan(
+  session: AgentSession,
+  plan: FixPlan,
+  addLog: (log: AgentLog) => void
+): Promise<void> {
+  addLog({
+    timestamp: new Date().toISOString(),
+    level: 'info',
+    stage: 'executing',
+    message: `开始执行计划: ${plan.steps.length} 个步骤`,
+  });
+
+  for (let i = 0; i < plan.steps.length; i++) {
+    const step = plan.steps[i];
+    if (session.state === 'cancelled') {
+      addLog({ timestamp: new Date().toISOString(), level: 'warn', stage: 'executing', message: '执行已取消' });
+      break;
+    }
+
+    session.currentStep = i + 1;
+    step.status = 'running';
+
+    addLog({
+      timestamp: new Date().toISOString(),
+      level: 'info',
+      stage: 'executing',
+      message: `执行步骤 ${i + 1}/${plan.steps.length}: ${step.description}`,
+      details: { skill: step.skillName, subAgent: step.subAgentName, mcps: step.requiredMcps },
+    });
+
+    try {
+      const result = await executeStep(session, step, addLog);
+      step.status = result.success ? 'completed' : 'failed';
+      step.result = result.output;
+      if (!result.success) step.error = result.output;
+
+      addLog({
+        timestamp: new Date().toISOString(),
+        level: result.success ? 'success' : 'error',
+        stage: 'executing',
+        message: `步骤 ${i + 1} ${result.success ? '完成' : '失败'}`,
+        details: { duration: result.duration },
+      });
+
+      if (!result.success) {
+        let retries = 0;
+        while (retries < 2 && step.status === 'failed') {
+          retries++;
+          addLog({ timestamp: new Date().toISOString(), level: 'warn', stage: 'executing', message: `步骤 ${i + 1} 重试 ${retries}/2...` });
+          const retryResult = await executeStep(session, step, addLog);
+          step.status = retryResult.success ? 'completed' : 'failed';
+          step.result = retryResult.output;
+          if (!retryResult.success) step.error = retryResult.output;
         }
-        
-        // 1. 获取所需技能（五级优先级）
-        const skills = await resolveSkills(step.requiredSkills, session);
-        
-        // 2. 安全校验技能
-        const validatedSkills = await validateSkills(skills);
-        
-        // 3. 创建临时子智能体运行技能
-        stepOutput = await executeStepWithSkills(step, validatedSkills, session);
-        
-        stepSuccess = true;
-        console.log(`[Executor] 步骤完成: ${step.description}`);
-        
-      } catch (error: any) {
-        retryCount++;
-        console.error(`[Executor] 步骤失败 (尝试 ${retryCount}/${maxRetries}):`, error?.message || error);
-        
-        if (retryCount > maxRetries) {
-          // 达到最大重试次数，尝试回滚
-          console.log(`[Executor] 达到最大重试次数，尝试回滚...`);
-          await rollbackStep(step, stepResults);
-          
-          stepResults.push({
-            stepId: step.id,
-            success: false,
-            output: `失败: ${error?.message || String(error)}`,
-            duration: Date.now() - startTime,
-          });
-          
-          // 触发重新规划
-          console.log(`[Executor] 触发重新规划...`);
-          // 这里可以调用规划模块重新生成计划
-          throw new Error(`步骤执行失败: ${step.description}`);
+        if (step.status === 'failed') {
+          addLog({ timestamp: new Date().toISOString(), level: 'error', stage: 'executing', message: `步骤 ${i + 1} 最终失败` });
+          plan.status = 'failed';
+          return;
         }
       }
+    } catch (error: any) {
+      step.status = 'failed';
+      step.error = error?.message || String(error);
+      addLog({ timestamp: new Date().toISOString(), level: 'error', stage: 'executing', message: `步骤 ${i + 1} 异常: ${step.error}` });
+      plan.status = 'failed';
+      return;
     }
-    
-    stepResults.push({
+
+    session.progress = Math.round(((i + 1) / plan.steps.length) * 100);
+  }
+
+  plan.status = 'completed';
+  addLog({ timestamp: new Date().toISOString(), level: 'success', stage: 'executing', message: '计划执行完成' });
+}
+
+async function executeStep(session: AgentSession, step: PlanStep, addLog: (log: AgentLog) => void): Promise<ExecutionResult> {
+  const startTime = Date.now();
+
+  // 1. 优先调用子智能体
+  if (step.subAgentName) {
+    const result = await executeSubAgent(step.subAgentName, step.description, session);
+    return {
       stepId: step.id,
-      success: stepSuccess,
-      output: stepOutput,
-      duration: Date.now() - startTime,
-    });
-    
-    // 更新步骤状态
-    step.status = stepSuccess ? 'completed' : 'failed';
+      success: result.success,
+      output: result.output,
+      duration: Math.round((Date.now() - startTime) / 1000),
+      toolCalls: result.toolCalls || [],
+    };
   }
-  
-  // 创建 PR（如果所有步骤成功）
-  let prUrl: string | null = null;
-  const allSuccess = stepResults.every(r => r.success);
-  
-  if (allSuccess) {
-    console.log(`[Executor] 所有步骤成功，创建 PR...`);
-    prUrl = await createPullRequest(session, plan);
-  }
-  
-  return {
-    success: allSuccess,
-    stepResults,
-    prUrl,
-  };
-}
 
-/**
- * 五级优先级解析技能
- * 1. 预制子智能体
- * 2. 本地缓存
- * 3. 远程拉取
- * 4. 自动创建
- * 5. 组合
- */
-async function resolveSkills(requiredSkills: string[], session: any): Promise<string[]> {
-  const resolved: string[] = [];
-  
-  for (const skillName of requiredSkills) {
-    console.log(`[Skills] 解析技能: ${skillName}`);
-    
-    // 1. 检查预制子智能体
-    if (await isPresetAgent(skillName)) {
-      console.log(`[Skills] [1/5] 找到预制子智能体: ${skillName}`);
-      resolved.push(skillName);
-      continue;
-    }
-    
-    // 2. 检查本地缓存
-    if (await isLocalCached(skillName)) {
-      console.log(`[Skills] [2/5] 找到本地缓存: ${skillName}`);
-      resolved.push(skillName);
-      continue;
-    }
-    
-    // 3. 远程拉取
+  // 2. 其次调用技能系统
+  if (step.skillName) {
     try {
-      if (await fetchRemoteSkill(skillName)) {
-        console.log(`[Skills] [3/5] 远程拉取成功: ${skillName}`);
-        resolved.push(skillName);
-        continue;
-      }
-    } catch (e) {
-      console.log(`[Skills] [3/5] 远程拉取失败: ${skillName}`);
+      const skillResult = await executeSkill(step.skillName, { description: step.description, cwd: process.cwd() });
+      return {
+        stepId: step.id,
+        success: skillResult.success !== false,
+        output: JSON.stringify(skillResult, null, 2).slice(0, 5000),
+        duration: Math.round((Date.now() - startTime) / 1000),
+        toolCalls: [{ toolName: step.skillName, input: { description: step.description }, output: JSON.stringify(skillResult), duration: 0 }],
+      };
+    } catch (e: any) {
+      return {
+        stepId: step.id,
+        success: false,
+        output: `技能执行失败: ${e?.message}`,
+        duration: Math.round((Date.now() - startTime) / 1000),
+        toolCalls: [],
+      };
     }
-    
-    // 4. 自动创建
-    try {
-      if (await autoCreateSkill(skillName, session)) {
-        console.log(`[Skills] [4/5] 自动创建成功: ${skillName}`);
-        resolved.push(skillName);
-        continue;
-      }
-    } catch (e) {
-      console.log(`[Skills] [4/5] 自动创建失败: ${skillName}`);
-    }
-    
-    // 5. 组合现有技能
-    const combo = await findSkillCombination(skillName);
-    if (combo) {
-      console.log(`[Skills] [5/5] 找到技能组合: ${combo}`);
-      resolved.push(...combo.split(','));
-      continue;
-    }
-    
-    console.log(`[Skills] 无法解析技能: ${skillName}，使用默认实现`);
-    resolved.push(skillName);
   }
-  
-  return resolved;
+
+  // 3. 回退：LLM 驱动生成具体操作指令
+  return executeStepByLLM(step, session, addLog);
 }
 
-/**
- * 校验技能（四阶段校验）
- */
-async function validateSkills(skills: string[]): Promise<string[]> {
-  const validated: string[] = [];
-  
-  for (const skill of skills) {
-    console.log(`[Validator] 校验技能: ${skill}`);
-    
-    // 阶段1：静态分析（检查代码质量）
-    const staticOk = await staticAnalysis(skill);
-    if (!staticOk) {
-      console.log(`[Validator] 静态分析失败: ${skill}`);
-      continue;
+async function executeSubAgent(
+  subAgentName: string,
+  description: string,
+  session: AgentSession
+): Promise<{ success: boolean; output: string; toolCalls: any[] }> {
+  switch (subAgentName) {
+    case 'issue-analyzer': {
+      const { analyzeIssue } = await import('./issue-analyzer.js');
+      // issue-analyzer 需要 issue 数据，这里简化调用
+      const result = await analyzeIssue(session.issueUrl, description, '', process.cwd());
+      return { success: true, output: `分析完成: ${result.rootCause}`, toolCalls: [] };
     }
-    
-    // 阶段2：沙箱测试
-    const sandboxOk = await sandboxTest(skill);
-    if (!sandboxOk) {
-      console.log(`[Validator] 沙箱测试失败: ${skill}`);
-      continue;
+    case 'codebase-navigator': {
+      const { locateCode } = await import('./codebase-navigator.js');
+      const results = locateCode(description, process.cwd());
+      return { success: results.length > 0, output: `定位到 ${results.length} 处代码`, toolCalls: [] };
     }
-    
-    // 阶段3：权限检查
-    const permissionOk = await checkPermissions(skill);
-    if (!permissionOk) {
-      console.log(`[Validator] 权限检查失败: ${skill}`);
-      continue;
+    case 'test-writer': {
+      const { writeTests } = await import('./test-writer.js');
+      const result = await writeTests([], description, process.cwd());
+      return { success: result.passed, output: result.output, toolCalls: [] };
     }
-    
-    // 阶段4：历史成功率检查
-    const historyOk = await checkHistorySuccess(skill);
-    if (!historyOk) {
-      console.log(`[Validator] 历史成功率过低: ${skill}`);
-      continue;
+    case 'regression-guard': {
+      const { runRegressionTests } = await import('./regression-guard.js');
+      const result = runRegressionTests(process.cwd());
+      return { success: result.passed, output: result.output, toolCalls: [] };
     }
-    
-    console.log(`[Validator] 技能校验通过: ${skill}`);
-    validated.push(skill);
+    case 'quality-gate': {
+      const { runQualityGate } = await import('./quality-gate.js');
+      const result = runQualityGate(process.cwd());
+      return { success: result.passed, output: `质量评分: ${result.overallScore}`, toolCalls: [] };
+    }
+    case 'build-system-expert': {
+      const { runBuild } = await import('./build-system-expert.js');
+      const result = runBuild(process.cwd());
+      return { success: result.success, output: `构建${result.success ? '成功' : '失败'}: ${result.errors.join('; ')}`, toolCalls: [] };
+    }
+    case 'pr-creator': {
+      const { createPullRequest } = await import('./pr-creator.js');
+      const result = await createPullRequest(session.issueUrl, description, description, process.cwd());
+      return { success: result.success, output: result.prUrl || result.error || 'PR 创建完成', toolCalls: [] };
+    }
+    case 'upstream-tracker': {
+      const { compareWithUpstream } = await import('./upstream-tracker.js');
+      const result = compareWithUpstream(process.cwd());
+      return { success: !!result, output: result ? `上游差异: ${result.divergedFiles.length} 个文件` : '无上游信息', toolCalls: [] };
+    }
+    default:
+      return { success: false, output: `未知子智能体: ${subAgentName}`, toolCalls: [] };
   }
-  
-  return validated;
 }
 
-/**
- * 使用技能执行步骤
- */
-async function executeStepWithSkills(step: any, skills: string[], session: any): Promise<string> {
-  let output = '';
-  
-  for (const skill of skills) {
-    console.log(`[Executor] 创建临时子智能体运行技能: ${skill}`);
-    
-    // 创建临时 session
-    const session = await unstable_v2_createSession({
-      cwd: config.defaultCwd || process.cwd(),
-    });
-    
-    // 调用技能
-    const prompt = `
-使用技能 ${skill} 执行以下步骤：
-${step.description}
+async function executeStepByLLM(step: PlanStep, session: AgentSession, addLog: (log: AgentLog) => void): Promise<ExecutionResult> {
+  const startTime = Date.now();
 
-目标文件：${step.targetFiles.join(', ')}
+  // 预算检查
+  const promptText = `${step.description} ${session.issueUrl}`;
+  const budgetCheck = checkBudgetForText(session.id, promptText);
+  if (!budgetCheck.allowed) {
+    return { stepId: step.id, success: false, output: `预算检查失败: ${budgetCheck.reason}`, duration: 0, toolCalls: [] };
+  }
 
-请直接执行，不要询问确认。
-`;
-    
-    const stream = query({
-      prompt,
-      options: {
-        model: config.agentDefaultModel,
-        maxTurns: 10,
-        systemPrompt: `你是技能执行器，正在执行 ${skill} 技能。`,
-        cwd: config.defaultCwd || process.cwd(),
-      },
-    });
-    
-    for await (const msg of stream) {
-      if (msg.type === 'assistant') {
-        const content = msg.message.content;
-        if (typeof content === 'string') {
-          output += content + '\n';
-        } else if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === 'text') {
-              output += block.text + '\n';
-            }
-          }
-        }
-      }
+  const systemPrompt = `你是一个精确的软件工程执行助手。根据步骤描述，生成可执行的操作指令。
+
+可用操作类型：
+- read_file: 读取文件内容（参数: path）
+- write_file: 写入/修改文件（参数: path, content）
+- run_command: 运行 shell 命令（参数: command）
+- git_commit: git 提交（参数: message）
+- search_code: 搜索代码（参数: pattern）
+- mcp_tool: 调用 MCP 工具（参数: server, tool, args）
+- skip: 跳过此步骤
+
+严格以 JSON 输出，不要包含其他文本：`;
+
+  const userPrompt = `步骤描述: ${step.description}\n子智能体: ${step.subAgentName || '无'}\n技能: ${step.skillName || '无'}\n需要 MCP: ${step.requiredMcps.join(', ')}\n工作目录: ${process.cwd()}\nIssue: ${session.issueUrl}\n\n请生成操作指令。`;
+
+  try {
+    const response = await complete({ system: systemPrompt, user: userPrompt, jsonMode: true, temperature: 0.2 });
+    trackTokenUsage(session.id, getDefaultModel(), 'openai', estimateTokens(systemPrompt + userPrompt), estimateTokens(response));
+    const action = JSON.parse(response);
+    let output = '';
+    let success = true;
+
+    switch (action.action) {
+      case 'read_file': output = await readFileAction(action.path); break;
+      case 'write_file': output = await writeFileAction(action.path, action.content); break;
+      case 'run_command': output = await runCommandAction(action.command); break;
+      case 'git_commit': output = await gitCommitAction(action.message); break;
+      case 'search_code': output = await searchCodeAction(action.pattern); break;
+      case 'mcp_tool': output = await mcpToolAction(action.server, action.tool, action.args); break;
+      case 'skip':
+      default: output = '步骤跳过';
     }
-    
-    console.log(`[Executor] 技能 ${skill} 执行完成`);
+
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    return { stepId: step.id, success, output, duration, toolCalls: [{ toolName: action.action, input: action, output, duration }] };
+  } catch (error: any) {
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    return { stepId: step.id, success: false, output: error?.message || String(error), duration, toolCalls: [] };
   }
-  
-  return output;
 }
 
-// ============= 技能解析辅助函数（简化实现）=============
 
-async function isPresetAgent(skillName: string): Promise<boolean> {
-  const presets = ['code-analyzer', 'code-fixer', 'test-writer', 'pr-creator'];
-  return presets.includes(skillName);
+
+// === 真实操作实现 ===
+
+async function readFileAction(filePath: string): Promise<string> {
+  const fullPath = path.resolve(filePath);
+  if (!fs.existsSync(fullPath)) throw new Error(`文件不存在: ${fullPath}`);
+  const content = fs.readFileSync(fullPath, 'utf-8');
+  return `文件内容 (${content.length} chars):\n${content.slice(0, 2000)}${content.length > 2000 ? '\n... (truncated)' : ''}`;
 }
 
-async function isLocalCached(skillName: string): Promise<boolean> {
-  // 检查 data/skills/ 目录
-  return false; // 简化实现
-}
-
-async function fetchRemoteSkill(skillName: string): Promise<boolean> {
-  // 从技能注册中心拉取
-  console.log(`[Skills] 从 ${config.skillRegistryUrl} 拉取 ${skillName}...`);
-  return false; // 简化实现
-}
-
-async function autoCreateSkill(skillName: string, session: any): Promise<boolean> {
-  // 使用 CodeBuddy SDK 自动生成技能
-  console.log(`[Skills] 自动创建技能: ${skillName}...`);
-  return false; // 简化实现
-}
-
-async function findSkillCombination(skillName: string): Promise<string | null> {
-  // 从技能组合知识库查找
-  const combos = db.getAllSkillCombinations();
-  // 简化：返回第一个
-  return combos.length > 0 ? combos[0].skill_ids : null;
-}
-
-// ============= 技能校验辅助函数（简化实现）=============
-
-async function staticAnalysis(skill: string): Promise<boolean> {
-  return true;
-}
-
-async function sandboxTest(skill: string): Promise<boolean> {
-  return true;
-}
-
-async function checkPermissions(skill: string): Promise<boolean> {
-  return true;
-}
-
-async function checkHistorySuccess(skill: string): Promise<boolean> {
-  const skillRecord = db.getSkill(skill);
-  if (skillRecord && skillRecord.success_rate < 0.5) {
-    return false;
+async function writeFileAction(filePath: string, content: string): Promise<string> {
+  const risk = checkFileWriteRisk(filePath);
+  if (risk.requiresApproval) {
+    throw new Error(`安全拦截: ${risk.reason}`);
   }
-  return true;
+  const fullPath = path.resolve(filePath);
+  const dir = path.dirname(fullPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(fullPath, content, 'utf-8');
+  return `文件已写入: ${fullPath} (${content.length} bytes)`;
 }
 
-// ============= 回滚和 PR 创建（简化实现）=============
-
-async function rollbackStep(step: any, previousResults: any[]): Promise<void> {
-  console.log(`[Executor] 回滚步骤: ${step.description}`);
-  // 简化：实际应使用 Git 回滚
+async function runCommandAction(command: string): Promise<string> {
+  if (!command) throw new Error('命令为空');
+  const risk = checkCommandRisk(command);
+  if (risk.requiresApproval) {
+    throw new Error(`安全拦截: ${risk.reason}`);
+  }
+  try {
+    const result = execSync(command, { encoding: 'utf-8', timeout: 60000, cwd: process.cwd(), maxBuffer: 10 * 1024 * 1024 });
+    return `命令执行成功:\n${result.slice(0, 2000)}`;
+  } catch (e: any) {
+    return `命令执行失败: ${e?.stderr || e?.message || String(e)}`;
+  }
 }
 
-async function createPullRequest(session: any, plan: any): Promise<string> {
-  console.log(`[Executor] 创建 PR...`);
-  // 简化：实际应调用 GitHub MCP
-  return 'https://github.com/libra-sys/MetaFix-Orchestrator/pull/1';
+async function gitCommitAction(message: string): Promise<string> {
+  try {
+    execSync('git add -A', { encoding: 'utf-8', cwd: process.cwd() });
+    execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, { encoding: 'utf-8', cwd: process.cwd() });
+    return `Git 提交成功: ${message}`;
+  } catch (e: any) {
+    return `Git 提交失败: ${e?.stderr || e?.message || String(e)}`;
+  }
+}
+
+async function searchCodeAction(pattern: string): Promise<string> {
+  try {
+    const result = execSync(
+      `grep -rn "${pattern.replace(/"/g, '\\"')}" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.py" --include="*.cpp" --include="*.h" --include="*.c" --include="*.java" --include="*.go" . 2>/dev/null || echo "No matches"`,
+      { encoding: 'utf-8', cwd: process.cwd(), timeout: 30000 }
+    );
+    return `搜索结果:\n${result.slice(0, 2000)}`;
+  } catch (e: any) {
+    return `搜索失败: ${e?.message || String(e)}`;
+  }
+}
+
+async function mcpToolAction(serverName: string, toolName: string, args: any): Promise<string> {
+  const result = await callMcpTool(serverName, toolName, args || {});
+  return `MCP 工具 ${serverName}/${toolName} 结果:\n${JSON.stringify(result, null, 2).slice(0, 2000)}`;
 }

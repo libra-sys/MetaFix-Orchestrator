@@ -1,182 +1,147 @@
-import config from '../config.js';
-import * as db from '../db.js';
-import { query } from '@tencent-ai/agent-sdk';
+import type { PerceptionResult, AgentSession, AgentLog } from './types.js';
+import { complete, hasLlmConfig } from '../llm/client.js';
 
-/**
- * 感知模块：分析 Issue、理解项目结构
- * @param session - Agent 会话
- * @returns 感知结果
- */
-export async function perceive(session: any): Promise<{
-  issueId: string;
-  issueTitle: string;
-  issueDescription: string;
-  rootCause: string;
-  relevantFiles: string[];
-  similarIssues: any[];
-  projectWiki: string;
-  rules: string;
-}> {
-  const { issueUrl, issueId } = session;
-  
-  console.log(`[Perception] 开始分析 Issue: ${issueId}`);
-  console.log(`[Perception] Issue URL: ${issueUrl}`);
-  
-  // 1. 获取 Issue 详情（模拟，实际应调用 GitHub API）
-  const issueDetails = await fetchIssueDetails(issueUrl);
-  
-  // 2. 加载项目 Wiki 和规则
-  const projectWiki = loadProjectWiki();
-  const rules = loadProjectRules();
-  
-  // 3. 使用 CodeBuddy SDK 分析代码，定位根因
-  console.log(`[Perception] 调用 CodeBuddy 分析代码...`);
-  const rootCause = await analyzeWithCodeBuddy(issueDetails.description, projectWiki);
-  
-  // 4. 检索相似历史 Issue
-  const similarIssues = findSimilarIssues(issueId);
-  
-  // 5. 确定相关文件
-  const relevantFiles = extractRelevantFiles(rootCause, issueDetails.description);
-  
-  console.log(`[Perception] 分析完成:`);
-  console.log(`[Perception] - 根因: ${rootCause.slice(0, 100)}...`);
-  console.log(`[Perception] - 相关文件: ${relevantFiles.length} 个`);
-  console.log(`[Perception] - 相似 Issue: ${similarIssues.length} 个`);
-  
-  return {
-    issueId,
-    issueTitle: issueDetails.title,
-    issueDescription: issueDetails.description,
-    rootCause,
-    relevantFiles,
-    similarIssues,
-    projectWiki,
-    rules,
-  };
-}
+export async function perceiveIssue(
+  session: AgentSession,
+  addLog: (log: AgentLog) => void
+): Promise<PerceptionResult> {
+  addLog({
+    timestamp: new Date().toISOString(),
+    level: 'info',
+    stage: 'perception',
+    message: `开始感知分析: ${session.issueUrl}`,
+  });
 
-/**
- * 获取 Issue 详情（模拟实现，实际应调用 GitHub API）
- */
-async function fetchIssueDetails(issueUrl: string): Promise<{ title: string; description: string }> {
-  // 模拟 Issue 数据
-  return {
-    title: `Issue #${extractIssueId(issueUrl)}`,
-    description: `模拟 Issue 描述：运行 long sequence 时随机 NaN。\n\n可能影响文件：flash_attention.cpp, attn_bias.cpp`,
-  };
-}
+  const issueData = await fetchGitHubIssue(session.issueUrl);
+  addLog({
+    timestamp: new Date().toISOString(),
+    level: 'info',
+    stage: 'perception',
+    message: `获取 Issue #${issueData.number}: ${issueData.title.slice(0, 60)}`,
+  });
 
-/**
- * 加载项目 Wiki
- */
-function loadProjectWiki(): string {
-  // 实际应从 .meta-fix/wiki/ 读取
-  return `项目 Wiki：\n- 项目使用 Ascend CANN 后端\n- 主要语言：C++, Python\n- 构建系统：CMake`;
-}
-
-/**
- * 加载项目规则
- */
-function loadProjectRules(): string {
-  // 实际应从 .meta-fix/rules/ 读取
-  return `项目规则：\n- 编码规范：Google C++ Style\n- 安全策略：禁止直接使用原始指针\n- 模块偏好：优先使用 ATen 算子`;
-}
-
-/**
- * 使用 CodeBuddy SDK 分析代码，定位根因
- */
-async function analyzeWithCodeBuddy(issueDescription: string, projectWiki: string): Promise<string> {
-  try {
-    const prompt = `
-你是一个代码分析专家。请根据以下信息，定位问题的根因。
-
-## Issue 描述
-${issueDescription}
-
-## 项目 Wiki
-${projectWiki}
-
-请分析可能的原因，重点关注：
-1. 数值稳定性问题（FP16 溢出等）
-2. 内存访问问题（空指针、越界等）
-3. 算法逻辑错误
-
-输出格式：
-- 根因：<详细描述>
-- 可能文件：<文件列表>
-- 建议修复方向：<方向描述>
-`;
-    
-    let result = '';
-    const stream = query({
-      prompt,
-      options: {
-        model: config.agentDefaultModel,
-        maxTurns: 5,
-        systemPrompt: '你是一个专业的 C++ 和 Python 代码分析专家。',
-      },
+  if (!hasLlmConfig()) {
+    addLog({
+      timestamp: new Date().toISOString(),
+      level: 'warn',
+      stage: 'perception',
+      message: '未配置 LLM，使用规则分析（请在设置中配置模型）',
     });
-    
-    for await (const msg of stream) {
-      if (msg.type === 'assistant') {
-        const content = msg.message.content;
-        if (typeof content === 'string') {
-          result += content;
-        } else if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === 'text') {
-              result += block.text;
-            }
-          }
-        }
-      }
-    }
-    
-    return result || '未能定位根因';
+    return ruleBasedAnalysis(issueData);
+  }
+
+  const systemPrompt = `你是一个专业的软件缺陷分析专家。分析 GitHub Issue，提取以下结构化信息：
+1. rootCause — 根本原因（具体、可操作的描述）
+2. affectedModules — 受影响的代码模块列表
+3. severity — 严重程度：low / medium / high / critical
+4. title / description — 精炼后的标题和描述
+5. relatedIssues — 可能相关的其他 Issue 编号列表
+6. projectContext — 项目技术栈和上下文信息
+7. wikiInsights — 相关技术洞察
+8. ruleMatches — 匹配的编码规则或最佳实践
+
+严格以 JSON 格式输出，不要包含任何 markdown 代码块或其他文本。`;
+
+  const userPrompt = `分析以下 GitHub Issue：
+URL: ${session.issueUrl}
+Title: ${issueData.title}
+Body:\n${issueData.body.slice(0, 8000)}`;
+
+  try {
+    const response = await complete({ system: systemPrompt, user: userPrompt, jsonMode: true, temperature: 0.2 });
+    const parsed = JSON.parse(response);
+
+    addLog({
+      timestamp: new Date().toISOString(),
+      level: 'success',
+      stage: 'perception',
+      message: `LLM 分析完成: ${(parsed.rootCause || '').slice(0, 80)}`,
+      details: { affectedModules: parsed.affectedModules, severity: parsed.severity },
+    });
+
+    return {
+      issueId: String(issueData.number),
+      title: parsed.title || issueData.title,
+      description: parsed.description || issueData.body,
+      rootCause: parsed.rootCause || '未确定根因',
+      affectedModules: Array.isArray(parsed.affectedModules) ? parsed.affectedModules : [],
+      severity: ['low', 'medium', 'high', 'critical'].includes(parsed.severity) ? parsed.severity : 'medium',
+      relatedIssues: Array.isArray(parsed.relatedIssues) ? parsed.relatedIssues : [],
+      projectContext: parsed.projectContext || '',
+      wikiInsights: Array.isArray(parsed.wikiInsights) ? parsed.wikiInsights : [],
+      ruleMatches: Array.isArray(parsed.ruleMatches) ? parsed.ruleMatches : [],
+    };
   } catch (error: any) {
-    console.error('[Perception] CodeBuddy 分析失败:', error);
-    return '分析失败：' + (error?.message || String(error));
+    addLog({
+      timestamp: new Date().toISOString(),
+      level: 'warn',
+      stage: 'perception',
+      message: `LLM 分析失败，回退到规则分析: ${error.message}`,
+    });
+    return ruleBasedAnalysis(issueData);
   }
 }
 
-/**
- * 查找相似历史 Issue
- */
-function findSimilarIssues(currentIssueId: string): any[] {
-  // 实际应从向量库检索
-  return [
-    { id: 'similar-1', title: '类似问题：FP16 溢出', successRate: 0.92 },
-    { id: 'similar-2', title: '类似问题：注意力计算 NaN', successRate: 0.88 },
-  ];
-}
+async function fetchGitHubIssue(url: string): Promise<{ number: number; title: string; body: string; html_url: string }> {
+  const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
+  if (!match) throw new Error(`无法解析 GitHub Issue URL: ${url}`);
+  const [, owner, repo, issueNumber] = match;
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`;
+  const token = process.env.GITHUB_TOKEN;
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github.v3+json',
+    'User-Agent': 'MetaFix-Orchestrator/1.0.0',
+  };
+  if (token) headers['Authorization'] = `token ${token}`;
 
-/**
- * 提取相关文件
- */
-function extractRelevantFiles(rootCause: string, description: string): string[] {
-  // 简单提取：从根因分析和描述中提取文件名
-  const filePattern = /[\w\-]+\.(cpp|h|py|cc)/g;
-  const files = new Set<string>();
-  
-  const rootMatches = rootCause.match(filePattern);
-  const descMatches = description.match(filePattern);
-  
-  if (rootMatches) rootMatches.forEach(f => files.add(f));
-  if (descMatches) descMatches.forEach(f => files.add(f));
-  
-  // 默认文件
-  if (files.size === 0) {
-    files.add('flash_attention.cpp');
+  const response = await fetch(apiUrl, { headers });
+  if (!response.ok) {
+    if (response.status === 404) throw new Error(`Issue 不存在或仓库为私有（需要 GITHUB_TOKEN）: ${url}`);
+    if (response.status === 403) throw new Error('GitHub API 速率限制，请设置 GITHUB_TOKEN');
+    throw new Error(`GitHub API 错误: ${response.status} ${response.statusText}`);
   }
-  
-  return Array.from(files);
+  const data = await response.json() as any;
+  return { number: data.number, title: data.title || 'Unknown', body: data.body || '', html_url: data.html_url || url };
 }
 
-/**
- * 从 URL 提取 Issue ID
- */
-function extractIssueId(issueUrl: string): string {
-  const match = issueUrl.match(/\/issues\/(\d+)/);
-  return match ? match[1] : 'unknown';
+function ruleBasedAnalysis(issueData: { number: number; title: string; body: string }): PerceptionResult {
+  const text = (issueData.title + ' ' + issueData.body).toLowerCase();
+  const keywords: Record<string, string> = {
+    nan: '数值计算中出现 NaN，可能是浮点精度或除零问题',
+    overflow: '数值溢出，可能是累加器精度不足或缓冲区过小',
+    null: '空指针未检查',
+    nullptr: '空指针未检查',
+    crash: '内存访问异常或空指针解引用',
+    segfault: '段错误，内存访问越界或空指针',
+    leak: '内存泄漏，对象未正确释放',
+    deadlock: '并发锁竞争导致死锁',
+    hang: '无限循环或阻塞等待',
+    slow: '性能瓶颈或算法复杂度问题',
+  };
+  let rootCause = '需要深入代码分析以确定根因';
+  for (const [kw, cause] of Object.entries(keywords)) {
+    if (text.includes(kw)) { rootCause = cause; break; }
+  }
+  const modules: string[] = [];
+  const modulePatterns = ['flash_attention', 'attention', 'decoder', 'encoder', 'scheduler', 'memory', 'kernel', 'optimizer', 'gradient', 'loss'];
+  for (const mod of modulePatterns) { if (text.includes(mod)) modules.push(mod); }
+  if (modules.length === 0) modules.push('core');
+
+  let severity: 'low' | 'medium' | 'high' | 'critical' = 'low';
+  if (text.includes('crash') || text.includes('segfault') || text.includes('security') || text.includes('cve')) severity = 'critical';
+  else if (text.includes('nan') || text.includes('overflow') || text.includes('leak') || text.includes('deadlock') || text.includes('hang')) severity = 'high';
+  else if (text.includes('error') || text.includes('fail') || text.includes('broken') || text.includes('bug')) severity = 'medium';
+
+  return {
+    issueId: String(issueData.number),
+    title: issueData.title,
+    description: issueData.body,
+    rootCause,
+    affectedModules: modules,
+    severity,
+    relatedIssues: [],
+    projectContext: '',
+    wikiInsights: [],
+    ruleMatches: [],
+  };
 }

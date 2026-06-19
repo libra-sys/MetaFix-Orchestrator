@@ -36,15 +36,18 @@ export const config = {
   logDir: process.env.LOG_DIR || path.join(__dirname, '..', 'data', 'logs'),
 
   // MCP 配置
-  mcpFilesystemEnabled: process.env.MCP_FILESYSTEM_ENABLED === 'true',
-  mcpGitEnabled: process.env.MCP_GIT_ENABLED === 'true',
-  mcpGithubEnabled: process.env.MCP_GITHUB_ENABLED === 'true',
-  mcpLoggingEnabled: process.env.MCP_LOGGING_ENABLED === 'true',
+  mcpFilesystemEnabled: process.env.MCP_FILESYSTEM_ENABLED !== 'false',  // 默认启用
+  mcpGitEnabled: process.env.MCP_GIT_ENABLED !== 'false',              // 默认启用
+  mcpGithubEnabled: process.env.MCP_GITHUB_ENABLED !== 'false',        // 默认启用
+  mcpLoggingEnabled: process.env.MCP_LOGGING_ENABLED !== 'false',      // 默认启用
 
   // Agent 配置
   agentMaxTurns: parseInt(process.env.AGENT_MAX_TURNS || '30'),
   agentDefaultModel: process.env.AGENT_DEFAULT_MODEL || 'claude-sonnet-4',
   agentReflectionEnabled: process.env.AGENT_REFLECTION_ENABLED !== 'false',
+
+  // 默认工作目录
+  defaultCwd: process.env.DEFAULT_CWD || path.join(__dirname, '..'),
 };
 
 export default config;

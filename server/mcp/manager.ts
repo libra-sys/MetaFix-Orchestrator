@@ -1,212 +1,104 @@
-/**
- * MCP 管理器：启动/停止 MCP 服务器
- */
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { McpStdioClient } from './client.js';
 
-import { spawn, ChildProcess } from 'child_process';
-import config from '../config.js';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 interface McpServerConfig {
   name: string;
   command: string;
   args: string[];
   env?: Record<string, string>;
-  enabled: boolean;
 }
 
-interface McpServerStatus {
-  name: string;
-  running: boolean;
-  pid?: number;
-  error?: string;
-}
-
-// MCP 服务器配置
-const MCP_SERVERS: Record<string, McpServerConfig> = {
-  filesystem: {
+const presetConfigs: McpServerConfig[] = [
+  {
     name: 'filesystem',
     command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-filesystem', process.cwd()],
-    enabled: config.mcpFilesystemEnabled,
+    args: ['-y', '@modelcontextprotocol/server-filesystem', path.join(__dirname, '..', '..')],
   },
-  git: {
+  {
     name: 'git',
     command: 'npx',
     args: ['-y', '@modelcontextprotocol/server-git'],
-    enabled: config.mcpGitEnabled,
   },
-  github: {
+  {
     name: 'github',
     command: 'npx',
     args: ['-y', '@modelcontextprotocol/server-github'],
-    env: {
-      GITHUB_PERSONAL_ACCESS_TOKEN: config.githubToken,
-    },
-    enabled: config.mcpGithubEnabled,
   },
-  logging: {
+  {
     name: 'logging',
-    command: 'node',
-    args: [path.join(__dirname, 'servers', 'logging-server.js')],
-    enabled: config.mcpLoggingEnabled,
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
   },
-};
+];
 
-// 运行中的 MCP 进程
-const runningServers = new Map<string, ChildProcess>();
+const clients = new Map<string, McpStdioClient>();
+const configs = new Map<string, McpServerConfig>();
+for (const c of presetConfigs) configs.set(c.name, c);
 
-/**
- * 启动所有启用的 MCP 服务器
- */
-export async function startAllMcpServers(): Promise<McpServerStatus[]> {
-  const results: McpServerStatus[] = [];
-
-  for (const [name, cfg] of Object.entries(MCP_SERVERS)) {
-    if (!cfg.enabled) {
-      console.log(`[MCP] ${name} 已禁用，跳过`);
-      results.push({ name, running: false });
-      continue;
-    }
-
-    try {
-      const status = await startMcpServer(name);
-      results.push(status);
-    } catch (error: any) {
-      console.error(`[MCP] 启动 ${name} 失败:`, error);
-      results.push({ name, running: false, error: error?.message || String(error) });
-    }
-  }
-
-  return results;
+export function getMcpServerStatuses(): Array<{ name: string; running: boolean; pid: number | null; error: string | null; toolCount: number }> {
+  return presetConfigs.map(c => {
+    const client = clients.get(c.name);
+    return {
+      name: c.name,
+      running: !!client && client.isRunning(),
+      pid: null,
+      error: null,
+      toolCount: client?.getCachedTools().length || 0,
+    };
+  });
 }
 
-/**
- * 启动单个 MCP 服务器
- */
-export async function startMcpServer(name: string): Promise<McpServerStatus> {
-  const cfg = MCP_SERVERS[name];
-  if (!cfg) {
-    throw new Error(`未知 MCP 服务器: ${name}`);
+export async function startMcpServer(name: string): Promise<{ name: string; running: boolean; error?: string; tools?: any[] }> {
+  const config = configs.get(name);
+  if (!config) return { name, running: false, error: `未知服务器: ${name}` };
+
+  const existing = clients.get(name);
+  if (existing) { existing.close(); clients.delete(name); }
+
+  try {
+    const client = new McpStdioClient(config.command, config.args, config.env);
+    await client.initialize();
+    const tools = await client.listTools();
+    clients.set(name, client);
+    console.log(`[MCP] ${name} started with ${tools.length} tools`);
+    return { name, running: true, tools };
+  } catch (error: any) {
+    console.error(`[MCP] Failed to start ${name}:`, error.message);
+    return { name, running: false, error: error?.message || String(error) };
   }
-
-  if (!cfg.enabled) {
-    return { name, running: false };
-  }
-
-  // 如果已运行，先停止
-  if (runningServers.has(name)) {
-    console.log(`[MCP] ${name} 已在运行，重启...`);
-    stopMcpServer(name);
-  }
-
-  console.log(`[MCP] 启动 ${name}...`);
-
-  const env = {
-    ...process.env,
-    ...cfg.env,
-  };
-
-  const proc = spawn(cfg.command, cfg.args, {
-    env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-
-  runningServers.set(name, proc);
-
-  // 监听输出
-  proc.stdout?.on('data', (data: Buffer) => {
-    console.log(`[MCP:${name}] ${data.toString().trim()}`);
-  });
-
-  proc.stderr?.on('data', (data: Buffer) => {
-    console.error(`[MCP:${name}] ${data.toString().trim()}`);
-  });
-
-  proc.on('error', (error) => {
-    console.error(`[MCP] ${name} 错误:`, error);
-    runningServers.delete(name);
-  });
-
-  proc.on('exit', (code) => {
-    console.log(`[MCP] ${name} 退出，代码: ${code}`);
-    runningServers.delete(name);
-  });
-
-  // 等待启动（简化：等待 2 秒）
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  return {
-    name,
-    running: proc.killed !== true,
-    pid: proc.pid,
-  };
 }
 
-/**
- * 停止单个 MCP 服务器
- */
 export function stopMcpServer(name: string): boolean {
-  const proc = runningServers.get(name);
-  if (!proc) {
-    console.log(`[MCP] ${name} 未运行`);
-    return false;
-  }
-
-  console.log(`[MCP] 停止 ${name}...`);
-  proc.kill('SIGTERM');
-  runningServers.delete(name);
-
+  const client = clients.get(name);
+  if (!client) return false;
+  client.close();
+  clients.delete(name);
+  console.log(`[MCP] ${name} stopped`);
   return true;
 }
 
-/**
- * 停止所有 MCP 服务器
- */
-export function stopAllMcpServers(): void {
-  console.log('[MCP] 停止所有服务器...');
-  for (const name of runningServers.keys()) {
-    stopMcpServer(name);
+export function getMcpClient(name: string): McpStdioClient | undefined {
+  return clients.get(name);
+}
+
+export async function callMcpTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<any> {
+  let client = clients.get(serverName);
+  if (!client || !client.isRunning()) {
+    const result = await startMcpServer(serverName);
+    if (!result.running) throw new Error(`无法启动 MCP 服务器 ${serverName}: ${result.error}`);
+    client = clients.get(serverName)!;
   }
+  return client.callTool(toolName, args);
 }
 
-/**
- * 获取所有 MCP 服务器状态
- */
-export function getMcpServerStatuses(): McpServerStatus[] {
-  return Array.from(runningServers.entries()).map(([name, proc]) => ({
-    name,
-    running: proc.killed !== true,
-    pid: proc.pid,
-  }));
-}
-
-/**
- * 检查 MCP 服务器是否可用
- */
-export function isMcpServerAvailable(name: string): boolean {
-  return runningServers.has(name) && runningServers.get(name)?.killed !== true;
-}
-
-// 导出配置供外部使用
-export function getMcpServerConfig(name: string): McpServerConfig | null {
-  return MCP_SERVERS[name] || null;
-}
-
-export function updateMcpServerConfig(name: string, updates: Partial<McpServerConfig>): void {
-  if (MCP_SERVERS[name]) {
-    MCP_SERVERS[name] = { ...MCP_SERVERS[name], ...updates };
-    console.log(`[MCP] 配置已更新: ${name}`);
+export async function getAllAvailableTools(): Promise<Array<{ server: string; tool: any }>> {
+  const all: Array<{ server: string; tool: any }> = [];
+  for (const [name, client] of clients) {
+    for (const tool of client.getCachedTools()) all.push({ server: name, tool });
   }
+  return all;
 }
-
-// 进程退出时清理
-process.on('exit', () => {
-  stopAllMcpServers();
-});
-
-process.on('SIGINT', () => {
-  stopAllMcpServers();
-  process.exit(0);
-});
-
-// 导入 path（用于 logging 服务器路径）
-import path from 'path';

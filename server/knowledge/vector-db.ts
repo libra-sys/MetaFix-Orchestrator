@@ -1,187 +1,88 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import config from '../config.js';
+import fs from 'fs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const VECTOR_DB_PATH = process.env.VECTOR_DB_PATH || path.join(process.cwd(), 'data', 'vectors.db');
+const vectorDir = path.dirname(VECTOR_DB_PATH);
+if (!fs.existsSync(vectorDir)) fs.mkdirSync(vectorDir, { recursive: true });
 
-// 向量数据库路径
-const vectorDbPath = config.vectorDbPath;
+const vdb = new Database(VECTOR_DB_PATH) as any;
 
-// 数据库连接
-let vectorDb: Database.Database | null = null;
-
-/**
- * 初始化向量数据库
- */
-export function initVectorDb(): Database.Database {
-  if (vectorDb) return vectorDb;
-
-  // 确保目录存在
-  const dataDir = path.dirname(vectorDbPath);
-  if (!require('fs').existsSync(dataDir)) {
-    require('fs').mkdirSync(dataDir, { recursive: true });
-  }
-
-  vectorDb = new Database(vectorDbPath);
-  vectorDb.pragma('journal_mode = WAL');
-
-  // 创建向量表（使用 sqlite-vec 扩展，如果可用）
+// 使用 sqlite-vec 扩展
+let vecLoaded = false;
+try {
+  vdb.loadExtension('sqlite_vec');
+  vecLoaded = true;
+} catch {
   try {
-    vectorDb.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec(
-        id TEXT PRIMARY KEY,
-        content TEXT,
-        embedding FLOAT[768]
-      )
-    `);
-  } catch (e) {
-    // 如果 vec 扩展不可用，使用普通表
-    console.log('[VectorDB] vec 扩展不可用，使用普通表');
-    vectorDb.exec(`
-      CREATE TABLE IF NOT EXISTS embeddings (
-        id TEXT PRIMARY KEY,
-        content TEXT NOT NULL,
-        embedding TEXT
-      )
-    `);
-  }
-
-  // 创建文档表
-  vectorDb.exec(`
-    CREATE TABLE IF NOT EXISTS documents (
-      id TEXT PRIMARY KEY,
-      content TEXT NOT NULL,
-      metadata TEXT,
-      created_at TEXT NOT NULL
-    )
-  `);
-
-  return vectorDb;
+    // 尝试常见路径
+    const possiblePaths = [
+      'sqlite_vec',
+      './node_modules/sqlite-vec/sqlite_vec',
+      path.join(process.cwd(), 'node_modules/sqlite-vec/sqlite_vec'),
+    ];
+    for (const p of possiblePaths) {
+      try { vdb.loadExtension(p); vecLoaded = true; break; } catch { /* continue */ }
+    }
+  } catch { /* ignore */ }
 }
 
-/**
- * 添加文档到知识库
- */
-export function addDocument(
-  id: string,
-  content: string,
-  metadata?: Record<string, any>
-): void {
-  const db = initVectorDb();
-  const stmt = db.prepare(`
-    INSERT OR REPLACE INTO documents (id, content, metadata, created_at)
-    VALUES (?, ?, ?, ?)
-  `);
+if (!vecLoaded) {
+  console.warn('[VectorDB] sqlite-vec 扩展加载失败，回退到纯文本搜索');
+}
 
-  stmt.run(
-    id,
-    content,
-    metadata ? JSON.stringify(metadata) : null,
-    new Date().toISOString()
+vdb.exec(`
+  CREATE TABLE IF NOT EXISTS knowledge_chunks (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    embedding TEXT,
+    metadata TEXT,
+    created_at TEXT NOT NULL
   );
+  CREATE INDEX IF NOT EXISTS idx_knowledge_source ON knowledge_chunks(source_type, source);
+`);
 
-  console.log(`[VectorDB] 文档已添加: ${id}`);
+export interface KnowledgeChunk {
+  id: string;
+  content: string;
+  source: string;
+  source_type: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
 }
 
-/**
- * 添加向量到数据库
- */
-export function addEmbedding(
-  id: string,
-  content: string,
-  embedding: number[]
-): void {
-  const db = initVectorDb();
+export function addChunk(chunk: KnowledgeChunk): void {
+  vdb.prepare(`INSERT INTO knowledge_chunks (id, content, source, source_type, metadata, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(chunk.id, chunk.content, chunk.source, chunk.source_type, JSON.stringify(chunk.metadata), chunk.created_at);
+}
 
-  try {
-    // 尝试使用 vec 扩展
-    const stmt = db.prepare(`
-      INSERT OR REPLACE INTO embeddings (id, content, embedding)
-      VALUES (?, ?, ?)
-    `);
-    stmt.run(id, content, new Float32Array(embedding));
-  } catch (e) {
-    // 回退到普通表
-    const stmt = db.prepare(`
-      INSERT OR REPLACE INTO embeddings (id, content, embedding)
-      VALUES (?, ?, ?)
-    `);
-    stmt.run(id, content, JSON.stringify(embedding));
+export function searchChunks(query: string, limit = 5): KnowledgeChunk[] {
+  // 纯文本搜索（若 sqlite-vec 不可用则以此为 fallback）
+  const rows = vdb.prepare(
+    `SELECT * FROM knowledge_chunks WHERE content LIKE ? ORDER BY created_at DESC LIMIT ?`
+  ).all(`%${query}%`, limit) as any[];
+  return rows.map(r => ({ ...r, metadata: JSON.parse(r.metadata || '{}') }));
+}
+
+export function getChunksBySource(sourceType: string, source?: string): KnowledgeChunk[] {
+  if (source) {
+    const rows = vdb.prepare('SELECT * FROM knowledge_chunks WHERE source_type = ? AND source = ? ORDER BY created_at DESC')
+      .all(sourceType, source) as any[];
+    return rows.map(r => ({ ...r, metadata: JSON.parse(r.metadata || '{}') }));
   }
-
-  console.log(`[VectorDB] 向量已添加: ${id}`);
+  const rows = vdb.prepare('SELECT * FROM knowledge_chunks WHERE source_type = ? ORDER BY created_at DESC')
+    .all(sourceType) as any[];
+  return rows.map(r => ({ ...r, metadata: JSON.parse(r.metadata || '{}') }));
 }
 
-/**
- * 搜索相似文档（简化实现）
- */
-export function searchSimilar(
-  queryEmbedding: number[],
-  limit: number = 5
-): Array<{ id: string; content: string; score: number }> {
-  const db = initVectorDb();
-
-  // 简化实现：返回所有文档（实际应使用向量相似度搜索）
-  const stmt = db.prepare('SELECT * FROM documents ORDER BY created_at DESC LIMIT ?');
-  const docs = stmt.all(limit) as Array<{ id: string; content: string; metadata: string }>;
-
-  return docs.map(doc => ({
-    id: doc.id,
-    content: doc.content,
-    score: Math.random(), // 模拟相似度分数
-  }));
+export function deleteChunksBySource(sourceType: string, source: string): void {
+  vdb.prepare('DELETE FROM knowledge_chunks WHERE source_type = ? AND source = ?').run(sourceType, source);
 }
 
-/**
- * 获取文档 by ID
- */
-export function getDocument(id: string): { id: string; content: string; metadata: any } | null {
-  const db = initVectorDb();
-  const stmt = db.prepare('SELECT * FROM documents WHERE id = ?');
-  const doc = stmt.get(id) as any;
-
-  if (!doc) return null;
-
-  return {
-    id: doc.id,
-    content: doc.content,
-    metadata: doc.metadata ? JSON.parse(doc.metadata) : null,
-  };
-}
-
-/**
- * 删除文档
- */
-export function deleteDocument(id: string): boolean {
-  const db = initVectorDb();
-  const stmt = db.prepare('DELETE FROM documents WHERE id = ?');
-  const result = stmt.run(id);
-  return result.changes > 0;
-}
-
-/**
- * 获取所有文档
- */
-export function getAllDocuments(): Array<{ id: string; content: string; metadata: any }> {
-  const db = initVectorDb();
-  const stmt = db.prepare('SELECT * FROM documents ORDER BY created_at DESC');
-  const docs = stmt.all() as Array<any>;
-
-  return docs.map(doc => ({
-    id: doc.id,
-    content: doc.content,
-    metadata: doc.metadata ? JSON.parse(doc.metadata) : null,
-  }));
-}
-
-/**
- * 关闭数据库
- */
-export function closeVectorDb(): void {
-  if (vectorDb) {
-    vectorDb.close();
-    vectorDb = null;
-  }
+export function getAllChunks(limit = 100): KnowledgeChunk[] {
+  const rows = vdb.prepare('SELECT * FROM knowledge_chunks ORDER BY created_at DESC LIMIT ?').all(limit) as any[];
+  return rows.map(r => ({ ...r, metadata: JSON.parse(r.metadata || '{}') }));
 }

@@ -1,337 +1,206 @@
 import * as db from '../db.js';
-import config from '../config.js';
-import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import fs from 'fs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+export type SkillSource = 'preset' | 'local' | 'remote' | 'auto_created' | 'combination';
+
+export interface ResolvedSkill {
+  name: string;
+  version: string;
+  source: SkillSource;
+  description: string;
+  requiredMcps: string[];
+  scriptPath?: string;
+  successRate: number;
+}
+
+const PRESET_SKILL_MAP: Record<string, string> = {
+  'receiving-code-review': './presets/receiving-code-review.js',
+  'deep-research': './presets/deep-research.js',
+  'analytics-data-analysis': './presets/analytics-data-analysis.js',
+  'agent-browser': './presets/agent-browser.js',
+  'find-skills': './presets/find-skills.js',
+  'create-skill': './presets/create-skill.js',
+  'install-skill-dependency': './presets/install-skill-dependency.js',
+  'docx': './presets/docx.js',
+  'pdf': './presets/pdf.js',
+  'pptx': './presets/pptx.js',
+  'xlsx': './presets/xlsx.js',
+  'content-research-writer': './presets/content-research-writer.js',
+};
 
 /**
- * 技能解析器：五级优先级获取技能
- * 
- * 优先级：
+ * 五级优先级技能获取
  * 1. 预制子智能体
  * 2. 本地缓存
  * 3. 远程拉取
  * 4. 自动创建
- * 5. 组合
+ * 5. 组合技能
  */
-
-// 预制子智能体列表
-const PRESET_AGENTS = [
-  'code-analyzer',
-  'code-fixer',
-  'test-writer',
-  'pr-creator',
-  'doc-generator',
-];
-
-/**
- * 解析技能（五级优先级）
- * @param skillName - 技能名称
- * @param context - 上下文（用于自动创建）
- * @returns 技能定义
- */
-export async function resolveSkill(
-  skillName: string,
-  context?: Record<string, any>
-): Promise<{
-  name: string;
-  source: 'preset-agent' | 'local-cache' | 'remote-fetch' | 'auto-create' | 'composite';
-  definition: string;
-  requiredMcps: string[];
-}> {
-  console.log(`[Resolver] 解析技能: ${skillName}`);
-
-  // 优先级1：预制子智能体
-  let result = await checkPresetAgent(skillName);
-  if (result) {
-    console.log(`[Resolver] [1/5] 找到预制子智能体: ${skillName}`);
-    return result;
-  }
-
-  // 优先级2：本地缓存
-  result = await checkLocalCache(skillName);
-  if (result) {
-    console.log(`[Resolver] [2/5] 找到本地缓存: ${skillName}`);
-    return result;
-  }
-
-  // 优先级3：远程拉取
-  result = await fetchRemote(skillName);
-  if (result) {
-    console.log(`[Resolver] [3/5] 远程拉取成功: ${skillName}`);
-    return result;
-  }
-
-  // 优先级4：自动创建
-  result = await autoCreate(skillName, context);
-  if (result) {
-    console.log(`[Resolver] [4/5] 自动创建成功: ${skillName}`);
-    return result;
-  }
-
-  // 优先级5：组合
-  result = await findComposite(skillName);
-  if (result) {
-    console.log(`[Resolver] [5/5] 找到技能组合: ${skillName}`);
-    return result;
-  }
-
-  // 未找到，返回默认定义
-  console.log(`[Resolver] 未找到技能: ${skillName}，使用默认定义`);
-  return {
-    name: skillName,
-    source: 'auto-create',
-    definition: `// 默认技能定义: ${skillName}\n// 自动生成的技能\nexports.async function execute(context) {\n  console.log('Executing ${skillName}...');\n  return { success: true };\n}`,
-    requiredMcps: [],
-  };
-}
-
-/**
- * 优先级1：检查预制子智能体
- */
-async function checkPresetAgent(skillName: string): Promise<{
-  name: string;
-  source: 'preset-agent';
-  definition: string;
-  requiredMcps: string[];
-} | null> {
-  if (PRESET_AGENTS.includes(skillName)) {
+export async function resolveSkill(skillName: string): Promise<ResolvedSkill | null> {
+  // L1: 预设技能（直接映射到本地文件）
+  if (PRESET_SKILL_MAP[skillName]) {
+    const localSkills = db.getAllSkills();
+    const preset = localSkills.find(s => s.name === skillName);
     return {
       name: skillName,
-      source: 'preset-agent',
-      definition: `// 预制技能: ${skillName}\n// 使用 CodeBuddy SDK 内置能力`,
-      requiredMcps: getDefaultMcps(skillName),
+      version: preset?.version || '1.0.0',
+      source: 'preset',
+      description: preset?.description || `${skillName} 预设技能`,
+      requiredMcps: preset ? JSON.parse(preset.required_mcps || '[]') : ['filesystem'],
+      scriptPath: PRESET_SKILL_MAP[skillName],
+      successRate: preset?.success_rate || 0.8,
     };
   }
-  return null;
-}
 
-/**
- * 优先级2：检查本地缓存
- */
-async function checkLocalCache(skillName: string): Promise<{
-  name: string;
-  source: 'local-cache';
-  definition: string;
-  requiredMcps: string[];
-} | null> {
-  const cachePath = path.join(config.skillCacheDir, `${skillName}.js`);
-
-  if (fs.existsSync(cachePath)) {
-    const definition = fs.readFileSync(cachePath, 'utf-8');
+  // L2: 本地数据库
+  const localSkills = db.getAllSkills();
+  const local = localSkills.find(s => s.name === skillName);
+  if (local) {
     return {
-      name: skillName,
-      source: 'local-cache',
-      definition,
-      requiredMcps: extractRequiredMcps(definition),
+      name: local.name,
+      version: local.version,
+      source: local.source as SkillSource,
+      description: local.description,
+      requiredMcps: JSON.parse(local.required_mcps || '[]'),
+      successRate: local.success_rate,
     };
   }
 
-  // 检查数据库
-  const skill = db.getSkill(skillName);
-  if (skill) {
-    return {
-      name: skill.name,
-      source: 'local-cache',
-      definition: `// Cached skill: ${skill.name}\n${skill.description || '// No description'}`,
-      requiredMcps: skill.required_mcps ? JSON.parse(skill.required_mcps) : [],
-    };
-  }
-
-  return null;
-}
-
-/**
- * 优先级3：远程拉取
- */
-async function fetchRemote(skillName: string): Promise<{
-  name: string;
-  source: 'remote-fetch';
-  definition: string;
-  requiredMcps: string[];
-} | null> {
-  try {
-    console.log(`[Resolver] 从 ${config.skillRegistryUrl} 拉取 ${skillName}...`);
-
-    // 模拟远程拉取（实际应调用 API）
-    const mockDefinition = `// 远程拉取的技能: ${skillName}\n// From: ${config.skillRegistryUrl}\nexports.async function execute(context) {\n  // 实现\n  return { success: true };\n}`;
-
-    // 保存到本地缓存
-    if (!fs.existsSync(config.skillCacheDir)) {
-      fs.mkdirSync(config.skillCacheDir, { recursive: true });
-    }
-    fs.writeFileSync(path.join(config.skillCacheDir, `${skillName}.js`), mockDefinition);
-
-    // 保存到数据库
+  // L3: 远程拉取
+  const remote = await fetchRemoteSkill(skillName);
+  if (remote) {
+    const now = new Date().toISOString();
     db.createSkill({
       id: `skill-${Date.now()}`,
-      name: skillName,
-      version: '1.0.0',
-      description: `远程拉取的技能: ${skillName}`,
-      author: 'registry',
-      source: 'remote-fetch',
-      required_mcps: JSON.stringify([]),
+      name: remote.name,
+      version: remote.version,
+      description: remote.description,
+      author: 'remote',
+      source: 'remote',
+      required_mcps: JSON.stringify(remote.requiredMcps),
       success_rate: 0.5,
       avg_duration: 0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: now,
+      updated_at: now,
     });
-
-    return {
-      name: skillName,
-      source: 'remote-fetch',
-      definition: mockDefinition,
-      requiredMcps: [],
-    };
-  } catch (error: any) {
-    console.error(`[Resolver] 远程拉取失败: ${skillName}`, error);
-    return null;
+    return { ...remote, source: 'remote' as SkillSource, successRate: 0.5 };
   }
-}
 
-/**
- * 优先级4：自动创建
- */
-async function autoCreate(
-  skillName: string,
-  context?: Record<string, any>
-): Promise<{
-  name: string;
-  source: 'auto-create';
-  definition: string;
-  requiredMcps: string[];
-} | null> {
-  try {
-    console.log(`[Resolver] 自动创建技能: ${skillName}...`);
-
-    // 使用 CodeBuddy SDK 生成技能代码
-    const definition = await generateSkillCode(skillName, context);
-
-    // 保存到本地缓存
-    if (!fs.existsSync(config.skillCacheDir)) {
-      fs.mkdirSync(config.skillCacheDir, { recursive: true });
-    }
-    fs.writeFileSync(path.join(config.skillCacheDir, `${skillName}.js`), definition);
-
-    // 保存到数据库
+  // L4: 自动创建
+  const autoCreated = await autoCreateSkill(skillName);
+  if (autoCreated) {
+    const now = new Date().toISOString();
     db.createSkill({
       id: `skill-${Date.now()}`,
-      name: skillName,
+      name: autoCreated.name,
       version: '1.0.0',
-      description: `自动创建的技能: ${skillName}`,
+      description: autoCreated.description,
       author: 'auto',
-      source: 'auto-create',
-      required_mcps: JSON.stringify([]),
-      success_rate: 0.5,
+      source: 'auto_created',
+      required_mcps: JSON.stringify(autoCreated.requiredMcps),
+      success_rate: 0.3,
       avg_duration: 0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: now,
+      updated_at: now,
     });
-
-    return {
-      name: skillName,
-      source: 'auto-create',
-      definition,
-      requiredMcps: [],
-    };
-  } catch (error: any) {
-    console.error(`[Resolver] 自动创建失败: ${skillName}`, error);
-    return null;
-  }
-}
-
-/**
- * 优先级5：组合现有技能
- */
-async function findComposite(skillName: string): Promise<{
-  name: string;
-  source: 'composite';
-  definition: string;
-  requiredMcps: string[];
-} | null> {
-  // 从技能组合知识库查找
-  const combos = db.getAllSkillCombinations();
-
-  for (const combo of combos) {
-    const skillIds = combo.skill_ids.split(',');
-    if (skillIds.includes(skillName) || combo.id === skillName) {
-      return {
-        name: skillName,
-        source: 'composite',
-        definition: `// 组合技能: ${skillName}\n// 组合 ID: ${combo.id}\n// 包含技能: ${combo.skill_ids}`,
-        requiredMcps: [],
-      };
-    }
+    return { ...autoCreated, source: 'auto_created' as SkillSource, version: '1.0.0', successRate: 0.3 };
   }
 
   return null;
 }
 
-// ============= 辅助函数 =============
+/**
+ * 执行技能
+ */
+export async function executeSkill(skillName: string, input: any): Promise<any> {
+  const skill = await resolveSkill(skillName);
+  if (!skill) throw new Error(`技能未找到: ${skillName}`);
 
-function getDefaultMcps(skillName: string): string[] {
-  const mcpMap: Record<string, string[]> = {
-    'code-analyzer': ['filesystem', 'git'],
-    'code-fixer': ['filesystem', 'git'],
-    'test-writer': ['filesystem'],
-    'pr-creator': ['github', 'git'],
-    'doc-generator': ['filesystem'],
-  };
-  return mcpMap[skillName] || [];
-}
+  // 预设技能：动态导入执行
+  if (skill.source === 'preset' && skill.scriptPath) {
+    const modulePath = new URL(skill.scriptPath, import.meta.url).href;
+    const mod = await import(modulePath);
+    if (typeof mod.execute === 'function') {
+      return mod.execute(input);
+    }
+    throw new Error(`技能 ${skillName} 没有导出 execute 函数`);
+  }
 
-function extractRequiredMcps(definition: string): string[] {
-  // 简单提取：从定义中查找 MCP 声明
-  const mcpMatch = definition.match(/requiredMcps:\s*\[(.*?)\]/);
-  if (mcpMatch) {
-    try {
-      return JSON.parse(`[${mcpMatch[1]]`);
-    } catch (e) {
-      return [];
+  // 本地技能：尝试从 skills 缓存目录加载
+  if (skill.source === 'local' || skill.source === 'auto_created' || skill.source === 'remote') {
+    const skillDir = path.join(process.cwd(), 'data', 'skills', skillName);
+    const indexPath = path.join(skillDir, 'index.ts');
+    const indexJsPath = path.join(skillDir, 'index.js');
+    if (fs.existsSync(indexPath) || fs.existsSync(indexJsPath)) {
+      const mod = await import(indexPath);
+      if (typeof mod.execute === 'function') {
+        return mod.execute(input);
+      }
     }
   }
-  return [];
+
+  throw new Error(`技能 ${skillName} 无法执行`);
 }
 
-async function generateSkillCode(skillName: string, context?: Record<string, any>): Promise<string> {
-  // 简化实现：返回模板代码
-  return `// 自动生成的技能: ${skillName}
-// 生成时间: ${new Date().toISOString()}
-
-export async function execute(context) {
-  const { session, step, perception } = context;
-  
-  console.log('[${skillName}] 开始执行...');
-  
-  // TODO: 使用 CodeBuddy SDK 生成具体实现
-  
-  return {
-    success: true,
-    output: '技能执行完成',
-  };
-}
-`;
-}
-
-/**
- * 批量解析技能
- */
-export async function resolveSkills(
-  skillNames: string[],
-  context?: Record<string, any>
-): Promise<Array<{
-  name: string;
-  source: string;
-  definition: string;
-  requiredMcps: string[];
-}>> {
-  const results = [];
-  for (const name of skillNames) {
-    const result = await resolveSkill(name, context);
-    results.push(result);
+async function fetchRemoteSkill(skillName: string): Promise<Omit<ResolvedSkill, 'source' | 'successRate'> | null> {
+  const registryUrl = process.env.SKILL_REGISTRY_URL;
+  if (!registryUrl) {
+    console.log(`[SkillResolver] 未配置 SKILL_REGISTRY_URL，跳过远程拉取`);
+    return null;
   }
-  return results;
+
+  try {
+    const url = `${registryUrl.replace(/\/$/, '')}/skills/${skillName}`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!response.ok) return null;
+    const data = await response.json() as any;
+    if (!data?.name) return null;
+    return {
+      name: data.name,
+      version: data.version || '1.0.0',
+      description: data.description || '',
+      requiredMcps: Array.isArray(data.requiredMcps) ? data.requiredMcps : ['filesystem'],
+    };
+  } catch (error: any) {
+    console.error(`[SkillResolver] 远程拉取失败:`, error.message);
+    return null;
+  }
+}
+
+async function autoCreateSkill(skillName: string): Promise<Omit<ResolvedSkill, 'source' | 'version' | 'successRate'> | null> {
+  console.log(`[SkillResolver] 尝试自动创建技能: ${skillName}`);
+
+  try {
+    const { complete } = await import('../llm/client.js');
+    const systemPrompt = '你是一个技能生成助手。根据技能名称，生成技能的详细描述和所需的 MCP 服务器列表。以 JSON 输出：{ "description": "...", "requiredMcps": ["filesystem"] }';
+    const userPrompt = `技能名称: ${skillName}\n请生成技能描述和所需 MCP。`;
+    const response = await complete({ system: systemPrompt, user: userPrompt, jsonMode: true, temperature: 0.3 });
+    const data = JSON.parse(response);
+    return {
+      name: skillName,
+      description: data.description || `${skillName} 技能`,
+      requiredMcps: Array.isArray(data.requiredMcps) ? data.requiredMcps : ['filesystem'],
+    };
+  } catch (error: any) {
+    console.error(`[SkillResolver] 自动创建技能失败:`, error.message);
+    return {
+      name: skillName,
+      description: `${skillName} 技能（自动创建）`,
+      requiredMcps: ['filesystem'],
+    };
+  }
+}
+
+export function getSkillCombinations(): Array<{ skillIds: string[]; successRate: number; usageCount: number }> {
+  try {
+    const combos = db.getAllSkillCombinations();
+    return combos.map(c => ({
+      skillIds: c.skill_ids.split(','),
+      successRate: c.success_rate,
+      usageCount: c.usage_count,
+    }));
+  } catch {
+    return [];
+  }
 }

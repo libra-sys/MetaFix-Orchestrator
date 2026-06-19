@@ -1,87 +1,119 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// 创建主命令
+const API_BASE = process.env.METAFIX_API_URL || 'http://localhost:3000/api';
 const program = new Command();
 
 program
   .name('metafix')
-  .description('MetaFix Orchestrator - 自主决策型 AI Agent 企业级智能缺陷修复系统')
+  .description('MetaFix Orchestrator CLI — 自主修复缺陷的 AI Agent')
   .version('1.0.0');
 
-// ============= 命令注册 =============
-
-// /fix 命令：修复 Issue
 program
-  .command('fix <issueUrl>')
-  .description('修复指定的 Issue（支持 GitHub Issue URL 或 Issue 编号）')
-  .option('-m, --model <model>', '使用的 AI 模型', 'claude-sonnet-4')
-  .option('-y, --yes', '自动确认所有提示')
-  .action(async (issueUrl: string, options: any) => {
-    const { fixCommand } = await import('./commands/fix.js');
-    await fixCommand(issueUrl, options);
+  .command('fix <issue-url>')
+  .description('启动修复流程，传入 GitHub Issue URL')
+  .option('-m, --model <model>', '指定模型', 'claude-sonnet-4')
+  .action(async (issueUrl: string, options: { model: string }) => {
+    console.log(`🚀 启动修复流程: ${issueUrl}`);
+    try {
+      const res = await fetch(`${API_BASE}/agent/fix`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ issueUrl, model: options.model }),
+      });
+      const data = await res.json() as any;
+      if (data.success) {
+        console.log(`✅ 修复流程已启动`);
+        console.log(`   Session ID: ${data.sessionId}`);
+        console.log(`   State: ${data.state}`);
+        // 轮询状态
+        await pollSession(data.sessionId);
+      } else {
+        console.error(`❌ 启动失败: ${data.error}`);
+        process.exit(1);
+      }
+    } catch (e: any) {
+      console.error(`❌ 请求失败: ${e?.message}`);
+      process.exit(1);
+    }
   });
 
-// /analyze 命令：分析 Issue
 program
-  .command('analyze <issueUrl>')
-  .description('分析指定的 Issue，输出根因和修复建议')
-  .option('-m, --model <model>', '使用的 AI 模型', 'claude-sonnet-4')
-  .action(async (issueUrl: string, options: any) => {
-    const { analyzeCommand } = await import('./commands/analyze.js');
-    await analyzeCommand(issueUrl, options);
+  .command('status')
+  .description('查看所有 Agent 修复会话状态')
+  .action(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/agent/sessions`);
+      const data = await res.json() as any;
+      const sessions = data.sessions || [];
+      if (sessions.length === 0) {
+        console.log('暂无活跃的修复会话');
+        return;
+      }
+      console.log('\n📋 Agent 修复会话\n');
+      for (const s of sessions) {
+        const icon = s.state === 'completed' ? '✅' : s.state === 'error' ? '❌' : s.state === 'idle' ? '⏸️' : '🔄';
+        console.log(`${icon} [${s.state.toUpperCase().padEnd(10)}] #${s.issueId} — 进度 ${s.progress}%`);
+        if (s.logs?.length > 0) {
+          const lastLog = s.logs[s.logs.length - 1];
+          console.log(`   └─ ${lastLog.stage}: ${lastLog.message}`);
+        }
+      }
+      console.log('');
+    } catch (e: any) {
+      console.error(`❌ 请求失败: ${e?.message}`);
+      process.exit(1);
+    }
   });
 
-// /history 命令：查看修复历史
 program
-  .command('history')
-  .description('查看修复历史记录')
-  .option('-n, --limit <number>', '显示条数', '10')
-  .option('-s, --status <status>', '按状态过滤')
-  .action(async (options: any) => {
-    const { historyCommand } = await import('./commands/history.js');
-    await historyCommand(options);
+  .command('health')
+  .description('检查服务健康状态')
+  .action(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/health`);
+      const data = await res.json() as any;
+      console.log(`🟢 服务状态: ${data.status}`);
+      console.log(`🕐 时间: ${data.timestamp}`);
+    } catch (e: any) {
+      console.error(`🔴 服务不可用: ${e?.message}`);
+      process.exit(1);
+    }
   });
 
-// /skills 命令：管理技能
-program
-  .command('skills')
-  .description('查看和管理技能库')
-  .option('-a, --add <name>', '添加新技能')
-  .option('-r, --remove <name>', '删除技能')
-  .option('-l, --list', '列出所有技能')
-  .action(async (options: any) => {
-    const { skillsCommand } = await import('./commands/skills.js');
-    await skillsCommand(options);
-  });
-
-// /config 命令：配置管理
 program
   .command('config')
-  .description('查看或更新配置')
-  .option('-s, --set <key=value>', '设置配置项')
-  .option('-g, --get [key]', '获取配置项')
-  .option('-l, --list', '列出所有配置')
-  .action(async (options: any) => {
-    const { configCommand } = await import('./commands/config.js');
-    await configCommand(options);
-  });
-
-// 默认命令：显示帮助
-program
+  .description('查看当前配置')
   .action(() => {
-    program.outputHelp();
+    console.log('\n⚙️  MetaFix Orchestrator 配置\n');
+    console.log(`API 地址: ${API_BASE}`);
+    console.log(`模型: claude-sonnet-4 (默认)`);
+    console.log('');
   });
 
-// 解析命令行参数
-program.parse(process.argv);
-
-// 如果没有提供任何命令，显示帮助
-if (process.argv.length <= 2) {
-  program.outputHelp();
+async function pollSession(sessionId: string) {
+  let completed = false;
+  while (!completed) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const res = await fetch(`${API_BASE}/agent/sessions/${sessionId}`);
+      const data = await res.json() as any;
+      const session = data.session;
+      if (!session) { console.log('❌ 会话不存在'); break; }
+      // 打印新日志
+      const logs = session.logs || [];
+      const lastLog = logs[logs.length - 1];
+      if (lastLog) {
+        process.stdout.write(`\r🔄 [${session.state}] 进度 ${session.progress}% — ${lastLog.stage}: ${lastLog.message}`);
+      }
+      if (session.state === 'completed' || session.state === 'error') {
+        completed = true;
+        console.log('');
+        if (session.state === 'completed') console.log('✅ 修复流程已完成');
+        else console.log('❌ 修复流程出错');
+      }
+    } catch { /* ignore polling errors */ }
+  }
 }
+
+program.parse();
