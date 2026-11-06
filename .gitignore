@@ -62,3 +62,29 @@ MetaFix-Orchestrator-Portable/
 MetaFix-Orchestrator-Portable.zip
 node_tmp/
 node.zip
+
+# 构建 / 调试日志（勿提交）
+tsc-*.txt
+ts-errors*.txt
+ts-build-*.txt
+vite-*.txt
+fe-build-*.txt
+be-*.txt
+server-out.txt
+server-err.txt
+build-output.txt
+compile-output.txt
+npm-install*.txt
+
+# 前端构建产物
+dist-client/
+
+# 本地 AI 规划笔记
+.codebuddy/
+
+# SQLite 运行时临时文件
+data/*.db-shm
+data/*.db-wal
+
+# 打包产物
+*.exe
